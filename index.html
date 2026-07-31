@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v1.5</title>
-<!-- PT Companion — version 1.5 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v1.6</title>
+<!-- PT Companion — version 1.6 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -18,8 +18,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
-
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <style>
 /* ============ DESIGN TOKENS ============
@@ -253,13 +251,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v1.5</div>
+  <div class="loginVersion" id="loginVersion">v1.6</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v1.5</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v1.6</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -282,16 +280,15 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '1.5';
-// v1.5: PT-001 (again) — version was being set via JS at runtime, which
-// still depends on the script executing at all. Matched the pattern already
-// used in Gym Tracker etc.: version is now hardcoded directly in the HTML
-// itself (<title>, login screen, top bar) — visible even with JS disabled,
-// even in a restricted preview sandbox, even via View Source. JS no longer
-// touches these three elements; VERSION const below is used only for the
-// in-app sync drawer and console logging. On every release: bump the
-// <title>, the top-of-file comment, the loginVersion div, the
-// topBarVersion span, AND this const — all five, by hand, together.
+const VERSION = '1.6';
+// v1.6: PT-003 — DEFINITIVE root-cause fix. Every prior login attempt (v1.1
+// through v1.5) depended on loading @supabase/supabase-js from a third-party
+// CDN (jsdelivr, then jsdelivr+unpkg fallback). Both consistently failed to
+// load in Pete's environment — the actual root cause all along. Ported the
+// exact pattern already proven working in the PAD launcher: raw fetch()
+// calls straight to Supabase's own REST API (/auth/v1/token, /rest/v1/*),
+// with zero third-party library dependency. Session persistence and refresh
+// also now match the launcher's localStorage + refresh-token pattern.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -304,31 +301,53 @@ document.getElementById('loginPass').addEventListener('keydown', e => { if (e.ke
 // Anon key is safe to ship client-side — RLS is what actually protects data.
 const SUPABASE_URL      = 'https://gnzxsbbmfwmtkqidxgoj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImduenhzYmJtZndtdGtxaWR4Z29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE3MjE0OTAsImV4cCI6MjA5NzI5NzQ5MH0.Jr-EiAdmpwuj69tJ7zRK22L7I2oiQaO3oWnu1uB915A';
+const SESSION_KEY = 'pt_companion_sb_session';
 
-// Fault-tolerant init: never throws, degrades to a clear on-screen message.
-// If the primary CDN (jsDelivr) didn't load window.supabase, try a second
-// CDN (unpkg) before giving up — covers the case where one CDN specifically
-// is blocked on Pete's network but the internet otherwise works fine.
-let supabase = null;
-function trySupabaseInit(){
-  if (window.supabase && typeof window.supabase.createClient === 'function'){
-    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: true, autoRefreshToken: true }
+// ---- Raw Supabase REST calls — no SDK, no CDN, matches the launcher's
+// proven pattern exactly (direct fetch() to Supabase's own REST API rather
+// than a third-party JS library). This was the actual root cause of every
+// prior login failure: the app depended on loading @supabase/supabase-js
+// from a public CDN, and that CDN load was evidently being blocked. fetch()
+// straight to *.supabase.co has no such dependency.
+async function sbSignIn(email, password){
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+    body: JSON.stringify({ email, password })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || 'Sign in failed');
+  return data;
+}
+async function sbRefreshSession(refreshToken){
+  try{
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+      body: JSON.stringify({ refresh_token: refreshToken })
     });
-    return true;
-  }
-  return false;
+    if (!res.ok) return null;
+    return await res.json();
+  }catch(e){ return null; }
 }
-function showSupabaseLoadError(){
-  const errEl = document.getElementById('loginError');
-  if (errEl) errEl.textContent = 'Could not load the Supabase library (tried two CDNs). Check your internet connection, or that no browser extension/firewall is blocking cdn.jsdelivr.net and unpkg.com, then reload.';
+async function sbSignOut(accessToken){
+  try{
+    await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + accessToken }
+    });
+  }catch(e){}
 }
-if (!trySupabaseInit()){
-  const fallback = document.createElement('script');
-  fallback.src = 'https://unpkg.com/@supabase/supabase-js@2';
-  fallback.onload = () => { if (trySupabaseInit()) { initAuth(); } else { showSupabaseLoadError(); } };
-  fallback.onerror = showSupabaseLoadError;
-  document.head.appendChild(fallback);
+// Raw REST wrapper for pt_* tables (PostgREST). RLS on the tables still
+// enforces auth.uid() = trainer_id — that's derived from the JWT in the
+// Authorization header, identically whether sent via the SDK or via fetch.
+async function sbFetch(path, options={}){
+  const headers = Object.assign({
+    'Content-Type': 'application/json',
+    'apikey': SUPABASE_ANON_KEY
+  }, options.headers || {});
+  if (_session && _session.access_token) headers['Authorization'] = 'Bearer ' + _session.access_token;
+  return fetch(SUPABASE_URL + path, Object.assign({}, options, { headers }));
 }
 
 // ---- Local envelope -------------------------------------------------------
@@ -401,28 +420,34 @@ async function doLogin(){
   const btn = document.getElementById('loginBtn');
   errEl.textContent = '';
   if (!email || !password){ errEl.textContent = 'Enter your email and password.'; return; }
-  if (!supabase){ showSupabaseLoadError(); return; }
   btn.disabled = true; btn.textContent = 'Logging in…';
   try{
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error){ errEl.textContent = error.message || 'Login failed.'; return; }
-    onAuthed(data.session);
+    const session = await sbSignIn(email, password);
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    onAuthed(session);
   }catch(err){
-    console.error('Login threw an unexpected error:', err);
-    errEl.textContent = 'Could not reach Supabase (' + (err && err.message ? err.message : 'network error') + '). Check your connection and try again.';
+    console.error('Login failed:', err);
+    errEl.textContent = err && err.message ? err.message : 'Login failed. Check your connection and try again.';
   }finally{
     btn.disabled = false; btn.textContent = 'Log in';
   }
 }
 
 async function initAuth(){
-  if (!supabase) return; // fallback CDN may still be loading; doLogin() re-checks and errors clearly if it never arrives
-  const { data } = await supabase.auth.getSession();
-  if (data.session){ onAuthed(data.session); }
-  supabase.auth.onAuthStateChange((event, session) => {
-    if (event === 'SIGNED_OUT'){ onSignedOut(); }
-    else if (session){ _session = session; }
-  });
+  const stored = localStorage.getItem(SESSION_KEY);
+  if (stored){
+    try{
+      const parsed = JSON.parse(stored);
+      const refreshed = await sbRefreshSession(parsed.refresh_token);
+      if (refreshed){
+        localStorage.setItem(SESSION_KEY, JSON.stringify(refreshed));
+        onAuthed(refreshed);
+        return;
+      }
+    }catch(e){ console.error('Session restore failed:', e); }
+    localStorage.removeItem(SESSION_KEY);
+  }
+  // No valid session — login screen is already showing by default.
 }
 
 function onAuthed(session){
@@ -433,7 +458,9 @@ function onAuthed(session){
   pullAll().then(()=>{ flushRetryQueue(); renderClientList(); });
 }
 function onSignedOut(){
+  if (_session && _session.access_token) sbSignOut(_session.access_token);
   _session = null;
+  localStorage.removeItem(SESSION_KEY);
   document.getElementById('appShell').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('hidden');
 }
@@ -452,24 +479,45 @@ let _syncState = 'idle'; // idle | syncing | ok | error
 async function pushRecord(table, record, isRetry){
   if (!getUserId()) { queueRetry(table, record); return false; }
   const payload = { id: record.id, trainer_id: getUserId(), data: record, updated_at: record.updatedAt || new Date().toISOString() };
-  const { error } = await supabase.from(table).upsert(payload);
-  if (error){
-    console.error('push failed', table, record.id, error);
+  try{
+    const res = await sbFetch(`/rest/v1/${table}`, {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify([payload])
+    });
+    if (!res.ok){
+      console.error('push failed', table, record.id, res.status, await res.text().catch(()=>''));
+      if (!isRetry) queueRetry(table, record);
+      _syncState = 'error'; renderSyncStatus();
+      return false;
+    }
+    return true;
+  }catch(err){
+    console.error('push threw', table, record.id, err);
     if (!isRetry) queueRetry(table, record);
     _syncState = 'error'; renderSyncStatus();
     return false;
   }
-  return true;
 }
 
 async function pullTable(table, localArrKey){
   if (!getUserId()) return;
-  const { data, error } = await supabase.from(table).select('id,data,updated_at');
-  if (error){ console.error('pull failed', table, error); _syncState='error'; renderSyncStatus(); return; }
+  let rows;
+  try{
+    const res = await sbFetch(`/rest/v1/${table}?select=id,data,updated_at`);
+    if (!res.ok){
+      console.error('pull failed', table, res.status, await res.text().catch(()=>''));
+      _syncState='error'; renderSyncStatus(); return;
+    }
+    rows = await res.json();
+  }catch(err){
+    console.error('pull threw', table, err);
+    _syncState='error'; renderSyncStatus(); return;
+  }
   const myGen = ++_envGeneration;
   const localArr = _env.data[localArrKey] || [];
   const byId = new Map(localArr.map(r => [r.id, r]));
-  (data || []).forEach(row => {
+  (rows || []).forEach(row => {
     const cloudRec = row.data;
     cloudRec.id = row.id;
     const localRec = byId.get(row.id);
