@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion</title>
+<title>PT Companion v1.5</title>
+<!-- PT Companion — version 1.5 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -252,13 +253,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion"></div>
+  <div class="loginVersion" id="loginVersion">v1.5</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion"></span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v1.5</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -281,23 +282,21 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '1.4';
-// v1.4: PT-003 (again) — the real architectural bug. Version-display and the
-// login button's click handler were defined LATE in this script, after the
-// Supabase client setup. If ANY error occurred earlier in the script — the
-// v1.1/v1.2 CDN or throw included — the whole script halted right there,
-// and everything below it (including the button wiring and the version
-// text) never ran. That's why fixing the CDN URL didn't fully fix things:
-// it was one instance of a general problem. Fix: critical/cosmetic UI now
-// runs FIRST, unconditionally, before anything that could fail. Supabase
-// init no longer throws — it degrades to a clear on-screen error instead,
-// and a second CDN (unpkg) is tried automatically if jsDelivr doesn't load.
+const VERSION = '1.5';
+// v1.5: PT-001 (again) — version was being set via JS at runtime, which
+// still depends on the script executing at all. Matched the pattern already
+// used in Gym Tracker etc.: version is now hardcoded directly in the HTML
+// itself (<title>, login screen, top bar) — visible even with JS disabled,
+// even in a restricted preview sandbox, even via View Source. JS no longer
+// touches these three elements; VERSION const below is used only for the
+// in-app sync drawer and console logging. On every release: bump the
+// <title>, the top-of-file comment, the loginVersion div, the
+// topBarVersion span, AND this const — all five, by hand, together.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
-document.title = 'PT Companion v' + VERSION;
-document.getElementById('loginVersion').textContent = 'v' + VERSION;
-document.getElementById('topBarVersion').textContent = 'v' + VERSION;
+// (version display is now static HTML above — see v1.5 note. Only the
+// button/keyboard wiring needs to happen here in JS.)
 document.getElementById('loginBtn').addEventListener('click', () => doLogin());
 document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key==='Enter') doLogin(); });
 
