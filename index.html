@@ -90,7 +90,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .field label{display:block;font-size:12px;color:var(--chalk-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;}
 .field input{
   width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);
-  background:var(--ink);color:var(--chalk);font-size:15px;
+  background:var(--ink);color:var(--chalk);font-size:16px;
 }
 .btnPrimary{
   width:100%;padding:12px;border:none;border-radius:10px;background:var(--amber);
@@ -99,6 +99,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .btnPrimary:disabled{opacity:0.55;cursor:not-allowed;}
 .loginError{color:var(--bad);font-size:13px;margin-top:10px;min-height:16px;}
 .loginHint{color:var(--chalk-dim);font-size:12px;margin-top:18px;max-width:320px;line-height:1.5;}
+.loginVersion{color:var(--chalk-dim);opacity:0.55;font-size:11px;margin-top:14px;font-family:var(--mono);}
 
 /* ---------- App shell ---------- */
 #appShell{min-height:100vh;display:flex;flex-direction:column;}
@@ -109,6 +110,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   position:sticky;top:0;z-index:10;
 }
 #topBar h1{font-size:22px;}
+.topBarVersion{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--chalk-dim);opacity:0.6;vertical-align:middle;margin-left:2px;}
 .syncDot{width:9px;height:9px;border-radius:50%;background:var(--chalk-dim);display:inline-block;margin-right:7px;}
 .syncDot.ok{background:var(--good);}
 .syncDot.err{background:var(--bad);}
@@ -123,7 +125,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .searchRow{display:flex;gap:8px;margin-bottom:14px;}
 .searchRow input{
   flex:1;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
-  background:var(--ink-soft);color:var(--chalk);font-size:14px;
+  background:var(--ink-soft);color:var(--chalk);font-size:16px;
 }
 
 .clientCard{
@@ -186,7 +188,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 
 textarea.notesArea{
   width:100%;min-height:80px;padding:11px 12px;border-radius:10px;border:1px solid var(--line);
-  background:var(--ink);color:var(--chalk);font-size:14px;resize:vertical;
+  background:var(--ink);color:var(--chalk);font-size:16px;resize:vertical;
 }
 
 .rowActions{display:flex;gap:10px;margin-top:18px;}
@@ -250,12 +252,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
+  <div class="loginVersion" id="loginVersion"></div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion</h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion"></span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -278,11 +281,10 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '1.1';
-// v1.1: PT-1.1-1 — fixed Supabase CDN script URL (previous path could 404,
-// which threw at load and silently killed the whole script incl. the login
-// button's event listener). Also added a load-check with a visible error
-// banner so a future CDN failure is obvious instead of a dead button.
+const VERSION = '1.3';
+// v1.3: PT-001 follow-up — version was only on the login screen and browser
+// tab title, not visible inside the app itself once logged in. Added to the
+// top bar next to the app name so it's visible everywhere, every time.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Supabase config -----------------------------------------------------
@@ -375,10 +377,16 @@ async function doLogin(){
   errEl.textContent = '';
   if (!email || !password){ errEl.textContent = 'Enter your email and password.'; return; }
   btn.disabled = true; btn.textContent = 'Logging in…';
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  btn.disabled = false; btn.textContent = 'Log in';
-  if (error){ errEl.textContent = error.message || 'Login failed.'; return; }
-  onAuthed(data.session);
+  try{
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error){ errEl.textContent = error.message || 'Login failed.'; return; }
+    onAuthed(data.session);
+  }catch(err){
+    console.error('Login threw an unexpected error:', err);
+    errEl.textContent = 'Could not reach Supabase (' + (err && err.message ? err.message : 'network error') + '). Check your connection and try again.';
+  }finally{
+    btn.disabled = false; btn.textContent = 'Log in';
+  }
 }
 
 async function initAuth(){
@@ -548,7 +556,7 @@ function openClientSheet(id){
       <div class="field"><label>Goals</label><input id="cfGoals" type="text" value="${escHtml(client.goals)}" placeholder="e.g. Fat loss, 5k under 25min"></div>
       <div class="field"><label>Notes</label><textarea id="cfNotes" class="notesArea">${escHtml(client.notes)}</textarea></div>
       ${!isNew ? `<div class="field"><label>Status</label>
-        <select id="cfStatus" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:15px;">
+        <select id="cfStatus" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
           <option value="active" ${client.status==='active'?'selected':''}>Active</option>
           <option value="archived" ${client.status==='archived'?'selected':''}>Archived</option>
         </select></div>` : ''}
@@ -608,6 +616,9 @@ function toast(msg){
 }
 
 // ---- Boot ------------------------------------------------------------------
+document.title = 'PT Companion v' + VERSION;
+document.getElementById('loginVersion').textContent = 'v' + VERSION;
+document.getElementById('topBarVersion').textContent = 'v' + VERSION;
 renderSyncStatus();
 initAuth();
 </script>
