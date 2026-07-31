@@ -281,27 +281,56 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '1.3';
-// v1.3: PT-001 follow-up — version was only on the login screen and browser
-// tab title, not visible inside the app itself once logged in. Added to the
-// top bar next to the app name so it's visible everywhere, every time.
+const VERSION = '1.4';
+// v1.4: PT-003 (again) — the real architectural bug. Version-display and the
+// login button's click handler were defined LATE in this script, after the
+// Supabase client setup. If ANY error occurred earlier in the script — the
+// v1.1/v1.2 CDN or throw included — the whole script halted right there,
+// and everything below it (including the button wiring and the version
+// text) never ran. That's why fixing the CDN URL didn't fully fix things:
+// it was one instance of a general problem. Fix: critical/cosmetic UI now
+// runs FIRST, unconditionally, before anything that could fail. Supabase
+// init no longer throws — it degrades to a clear on-screen error instead,
+// and a second CDN (unpkg) is tried automatically if jsDelivr doesn't load.
 const LS_KEY  = 'pt_companion_v1';
+
+// ---- Critical UI: runs first, unconditionally, before anything risky -----
+document.title = 'PT Companion v' + VERSION;
+document.getElementById('loginVersion').textContent = 'v' + VERSION;
+document.getElementById('topBarVersion').textContent = 'v' + VERSION;
+document.getElementById('loginBtn').addEventListener('click', () => doLogin());
+document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key==='Enter') doLogin(); });
 
 // ---- Supabase config -----------------------------------------------------
 // Anon key is safe to ship client-side — RLS is what actually protects data.
-// Pete: paste your project's anon public key below.
 const SUPABASE_URL      = 'https://gnzxsbbmfwmtkqidxgoj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImduenhzYmJtZndtdGtxaWR4Z29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE3MjE0OTAsImV4cCI6MjA5NzI5NzQ5MH0.Jr-EiAdmpwuj69tJ7zRK22L7I2oiQaO3oWnu1uB915A';
 
-if (!window.supabase || typeof window.supabase.createClient !== 'function'){
-  document.getElementById('loginError').textContent =
-    'Could not load the Supabase library from the CDN. Check your internet connection, or that no browser extension is blocking cdn.jsdelivr.net, then reload.';
-  document.getElementById('loginBtn').disabled = true;
-  throw new Error('PT Companion: window.supabase not available — aborting init');
+// Fault-tolerant init: never throws, degrades to a clear on-screen message.
+// If the primary CDN (jsDelivr) didn't load window.supabase, try a second
+// CDN (unpkg) before giving up — covers the case where one CDN specifically
+// is blocked on Pete's network but the internet otherwise works fine.
+let supabase = null;
+function trySupabaseInit(){
+  if (window.supabase && typeof window.supabase.createClient === 'function'){
+    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true }
+    });
+    return true;
+  }
+  return false;
 }
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true }
-});
+function showSupabaseLoadError(){
+  const errEl = document.getElementById('loginError');
+  if (errEl) errEl.textContent = 'Could not load the Supabase library (tried two CDNs). Check your internet connection, or that no browser extension/firewall is blocking cdn.jsdelivr.net and unpkg.com, then reload.';
+}
+if (!trySupabaseInit()){
+  const fallback = document.createElement('script');
+  fallback.src = 'https://unpkg.com/@supabase/supabase-js@2';
+  fallback.onload = () => { if (trySupabaseInit()) { initAuth(); } else { showSupabaseLoadError(); } };
+  fallback.onerror = showSupabaseLoadError;
+  document.head.appendChild(fallback);
+}
 
 // ---- Local envelope -------------------------------------------------------
 // {version, lastUpdated, lastExported, data:{clients:[...]}}
@@ -366,9 +395,6 @@ async function flushRetryQueue(){
 let _session = null;
 function getUserId(){ return _session && _session.user ? _session.user.id : null; }
 
-document.getElementById('loginBtn').addEventListener('click', doLogin);
-document.getElementById('loginPass').addEventListener('keydown', e => { if (e.key==='Enter') doLogin(); });
-
 async function doLogin(){
   const email = document.getElementById('loginEmail').value.trim();
   const password = document.getElementById('loginPass').value;
@@ -376,6 +402,7 @@ async function doLogin(){
   const btn = document.getElementById('loginBtn');
   errEl.textContent = '';
   if (!email || !password){ errEl.textContent = 'Enter your email and password.'; return; }
+  if (!supabase){ showSupabaseLoadError(); return; }
   btn.disabled = true; btn.textContent = 'Logging in…';
   try{
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
@@ -390,6 +417,7 @@ async function doLogin(){
 }
 
 async function initAuth(){
+  if (!supabase) return; // fallback CDN may still be loading; doLogin() re-checks and errors clearly if it never arrives
   const { data } = await supabase.auth.getSession();
   if (data.session){ onAuthed(data.session); }
   supabase.auth.onAuthStateChange((event, session) => {
@@ -616,9 +644,6 @@ function toast(msg){
 }
 
 // ---- Boot ------------------------------------------------------------------
-document.title = 'PT Companion v' + VERSION;
-document.getElementById('loginVersion').textContent = 'v' + VERSION;
-document.getElementById('topBarVersion').textContent = 'v' + VERSION;
 renderSyncStatus();
 initAuth();
 </script>
