@@ -18,7 +18,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <style>
 /* ============ DESIGN TOKENS ============
@@ -278,7 +278,11 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '1.0';
+const VERSION = '1.1';
+// v1.1: PT-1.1-1 — fixed Supabase CDN script URL (previous path could 404,
+// which threw at load and silently killed the whole script incl. the login
+// button's event listener). Also added a load-check with a visible error
+// banner so a future CDN failure is obvious instead of a dead button.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Supabase config -----------------------------------------------------
@@ -287,6 +291,12 @@ const LS_KEY  = 'pt_companion_v1';
 const SUPABASE_URL      = 'https://gnzxsbbmfwmtkqidxgoj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImduenhzYmJtZndtdGtxaWR4Z29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE3MjE0OTAsImV4cCI6MjA5NzI5NzQ5MH0.Jr-EiAdmpwuj69tJ7zRK22L7I2oiQaO3oWnu1uB915A';
 
+if (!window.supabase || typeof window.supabase.createClient !== 'function'){
+  document.getElementById('loginError').textContent =
+    'Could not load the Supabase library from the CDN. Check your internet connection, or that no browser extension is blocking cdn.jsdelivr.net, then reload.';
+  document.getElementById('loginBtn').disabled = true;
+  throw new Error('PT Companion: window.supabase not available — aborting init');
+}
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession: true, autoRefreshToken: true }
 });
