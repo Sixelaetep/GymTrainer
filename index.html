@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.6</title>
-<!-- PT Companion — version 2.6 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.7</title>
+<!-- PT Companion — version 2.7 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -301,13 +301,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.6</div>
+  <div class="loginVersion" id="loginVersion">v2.7</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.6</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.7</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -337,21 +337,20 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.6';
-// v2.6: Programme model reshaped to match how PT programmes actually work.
-// "Templates" renamed to "Plans" throughout (reusable named exercise sets —
-// e.g. "Day 1 - Push", "Daily Mobility"). A client's "Programme" is now a
-// time-bound container (name, start date, duration in weeks, notes) that
-// holds several Plans — e.g. 4 gym days + a general one — rather than one
-// flat exercise list. Adding a plan deep-copies it from the library so
-// editing a client's copy never touches the reusable Plan. "Create next
-// programme from this review" (in a PT session) now duplicates every plan
-// in the reviewed programme, not just one list, carrying the duration
-// forward with a fresh start date. Client Overview gained a separate
-// ⚠️ Injuries/issues field, distinct from general notes, with a warning
-// indicator on the client list card when present. v2.0-era single-list
-// client programmes migrate automatically into one "Main plan" inside a
-// new-shape programme; existing Templates rename to Plans (same data).
+const VERSION = '2.7';
+// v2.7: PT session review is now a working draft of the next programme,
+// not just free-text boxes. Selecting a programme to review brings its
+// plans through as collapsible sections; each exercise shows its current
+// target with a note field ("changes or issues") and an "Adjust" button
+// that opens the same target-set editor used everywhere else, so bumping
+// a weight or rep target takes one tap. New exercises can be added to a
+// plan during review, whole plans can be replaced (pick a different
+// library plan, or go blank) or dropped, and more plans can be added.
+// "Create next programme from this review" now builds the new programme
+// from this edited draft — carrying forward exactly what was decided,
+// including any added exercises or swapped plans — rather than a blind
+// duplicate of the old one. Per-exercise notes are working memory for the
+// review itself and aren't carried into the saved programme.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -1313,37 +1312,32 @@ function openNewProgrammeSheet(client, parentBody){
 // Add a plan into a programme's plans[] — either copy a reusable Plan
 // (deep-cloned, so editing the copy never touches the library Plan) or
 // start a blank one built fresh for this programme only.
-function openAddPlanPicker(programme, onDone){
+// Generic "choose a plan source" sheet — blank, or copy from the Plans
+// library. Calls onChosen({name, items}) and closes itself; used both for
+// adding a plan to a programme and for replacing/adding a plan within a
+// session's review draft.
+function choosePlanSource(title, onChosen){
   const tpls = templates();
   const backdrop = document.createElement('div');
   backdrop.className = 'sheetBackdrop';
   backdrop.innerHTML = `
     <div class="sheet">
       <div class="sheetHandle"></div>
-      <div class="sheetHeader"><h2>Add plan</h2><button class="iconBtn" data-close>✕</button></div>
-      <div class="rowActions"><button class="btnGhost" id="apBlank">Blank plan</button></div>
-      ${tpls.length ? '<div class="field"><label>Or copy from your Plans library</label><div id="apPickList"></div></div>' : '<div class="phasePlaceholder">No reusable plans in your library yet — create some in the Plans tab, or add a blank one now.</div>'}
+      <div class="sheetHeader"><h2>${escHtml(title)}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="rowActions"><button class="btnGhost" id="cpsBlank">Blank plan</button></div>
+      ${tpls.length ? '<div class="field"><label>Or copy from your Plans library</label><div id="cpsPickList"></div></div>' : '<div class="phasePlaceholder">No reusable plans in your library yet — create some in the Plans tab, or add a blank one now.</div>'}
     </div>
   `;
   document.body.appendChild(backdrop);
   backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
   backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
-
-  function addPlan(name, items){
-    programme.plans = programme.plans || [];
-    programme.plans.push({ id: uuid(), name, items: (items||[]).map(it => Object.assign({}, it, { itemId: uuid(), targetSets: (it.targetSets||[]).map(s=>Object.assign({},s)) })) });
-    programme.updatedAt = new Date().toISOString();
-    persistAndSync('pt_programs','programs',programme);
-    backdrop.remove();
-    onDone();
-  }
-
-  backdrop.querySelector('#apBlank').addEventListener('click', () => {
+  backdrop.querySelector('#cpsBlank').addEventListener('click', () => {
     const name = prompt('Plan name:', 'New plan');
     if (!name) return;
-    addPlan(name.trim(), []);
+    backdrop.remove();
+    onChosen({ name: name.trim(), items: [] });
   });
-  const pickList = backdrop.querySelector('#apPickList');
+  const pickList = backdrop.querySelector('#cpsPickList');
   if (pickList){
     pickList.innerHTML = tpls.map(t => `
       <div class="clientCard" data-id="${escHtml(t.id)}" style="margin-bottom:8px;">
@@ -1353,10 +1347,21 @@ function openAddPlanPicker(programme, onDone){
     pickList.querySelectorAll('.clientCard').forEach(el => {
       el.addEventListener('click', () => {
         const tpl = tpls.find(t=>t.id===el.dataset.id);
-        addPlan(tpl.name, tpl.items);
+        backdrop.remove();
+        onChosen({ name: tpl.name, items: tpl.items });
       });
     });
   }
+}
+
+function openAddPlanPicker(programme, onDone){
+  choosePlanSource('Add plan', ({name, items}) => {
+    programme.plans = programme.plans || [];
+    programme.plans.push({ id: uuid(), name, items: (items||[]).map(it => Object.assign({}, it, { itemId: uuid(), targetSets: (it.targetSets||[]).map(s=>Object.assign({},s)) })) });
+    programme.updatedAt = new Date().toISOString();
+    persistAndSync('pt_programs','programs',programme);
+    onDone();
+  });
 }
 
 // Editing the items within one plan inside a programme.
@@ -1580,6 +1585,18 @@ function renderClientSessionsTab(body, client, highlightSessionId){
   body.querySelector('#csLogNew').addEventListener('click', () => openSessionSheet(client, null, body));
 }
 
+function buildReviewDraft(sourceProg){
+  if (!sourceProg) return [];
+  return (sourceProg.plans||[]).map(pl => ({
+    id: uuid(), name: pl.name,
+    items: (pl.items||[]).map(it => Object.assign({}, it, {
+      itemId: uuid(),
+      targetSets: (it.targetSets||[]).map(s => Object.assign({}, s)),
+      reviewNote: '' // working note while deciding progression — not carried into the saved programme
+    }))
+  }));
+}
+
 function openSessionSheet(client, existingSession, parentBody){
   const isNew = !existingSession;
   const activeProg = activeProgrammeFor(client.id);
@@ -1590,6 +1607,8 @@ function openSessionSheet(client, existingSession, parentBody){
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
   };
   const linkedProgOptions = clientProgrammes(client.id);
+  let _reviewDraft = buildReviewDraft(allPrograms().find(p => p.id === session.programmeId));
+
   const backdrop = document.createElement('div');
   backdrop.className = 'sheetBackdrop';
   backdrop.innerHTML = `
@@ -1603,8 +1622,9 @@ function openSessionSheet(client, existingSession, parentBody){
           ${linkedProgOptions.map(p => `<option value="${escHtml(p.id)}" ${session.programmeId===p.id?'selected':''}>${escHtml(p.name)}${p.status==='archived'?' (archived)':''}</option>`).join('')}
         </select>
       </div>
+      <div id="ssReviewDraftZone"></div>
       <div class="field"><label>How's it gone since last time? (adherence, wins, issues)</label><textarea id="ssReview" class="notesArea" placeholder="e.g. Hit all sessions, squat feeling strong, shoulder niggle on overhead press">${escHtml(session.reviewNotes)}</textarea></div>
-      <div class="field"><label>Progression &amp; what's next (exercises to push, ease off, or add for next programme)</label><textarea id="ssProgression" class="notesArea" placeholder="e.g. Bump squat to 70kg, swap overhead press for landmine press, add core work">${escHtml(session.progressionNotes)}</textarea></div>
+      <div class="field"><label>Progression &amp; what's next (overall summary)</label><textarea id="ssProgression" class="notesArea" placeholder="e.g. Bump squat to 70kg, swap overhead press for landmine press, add core work">${escHtml(session.progressionNotes)}</textarea></div>
       <div class="field"><label>Logged performance this session (optional)</label></div>
       <div id="ssItemList"></div>
       <div class="rowActions"><button class="btnGhost" id="ssAddItem">+ Log exercise performance</button></div>
@@ -1612,12 +1632,136 @@ function openSessionSheet(client, existingSession, parentBody){
         ${!isNew ? '<button class="btnGhost btnDanger" id="ssDelete">Delete</button>' : ''}
         <button class="btnAmber" id="ssSave">${isNew ? 'Save session' : 'Save'}</button>
       </div>
-      ${session.programmeId ? '<div class="rowActions"><button class="btnGhost" id="ssNewProg">Create next programme from this review</button></div>' : ''}
+      <div class="rowActions" id="ssNewProgRow"></div>
     </div>
   `;
   document.body.appendChild(backdrop);
   backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
   backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+
+  // ---- Review draft: collapsible plans, editable per-exercise ----
+  const draftZone = backdrop.querySelector('#ssReviewDraftZone');
+  const newProgRow = backdrop.querySelector('#ssNewProgRow');
+
+  function renderNewProgRow(){
+    newProgRow.innerHTML = session.programmeId
+      ? '<button class="btnAmber" id="ssNewProg" style="width:100%;">Create next programme from this review</button>'
+      : '';
+    const btn = newProgRow.querySelector('#ssNewProg');
+    if (btn) btn.addEventListener('click', onCreateNextProgramme);
+  }
+
+  function renderDraft(){
+    if (!session.programmeId || !_reviewDraft.length){
+      draftZone.innerHTML = session.programmeId
+        ? '<div class="phasePlaceholder">This programme has no plans to review.</div>'
+        : '';
+      return;
+    }
+    draftZone.innerHTML = `
+      <div class="field"><label>Review last programme's plans</label></div>
+      <div id="ssDraftPlans"></div>
+      <div class="rowActions"><button type="button" class="btnGhost" id="ssAddDraftPlan">+ Add another plan</button></div>
+    `;
+    const plansEl = draftZone.querySelector('#ssDraftPlans');
+    plansEl.innerHTML = _reviewDraft.map((pl, pi) => `
+      <details class="reviewPlanBlock" data-pi="${pi}" style="margin-bottom:10px;background:var(--ink-soft);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;">
+        <summary style="cursor:pointer;font-weight:600;font-size:14.5px;">${escHtml(pl.name)} <span style="color:var(--chalk-dim);font-weight:400;font-size:12px;">(${pl.items.length} exercises)</span></summary>
+        <div class="rowActions" style="margin-top:10px;">
+          <button type="button" class="btnGhost" data-replaceplan="${pi}">🔁 Replace plan</button>
+          <button type="button" class="btnGhost btnDanger" data-removeplan="${pi}">Remove plan</button>
+        </div>
+        <div id="ssDraftItems-${pi}" style="margin-top:8px;"></div>
+        <div class="rowActions"><button type="button" class="btnGhost" data-addex="${pi}">+ Add exercise</button></div>
+      </details>
+    `).join('');
+
+    _reviewDraft.forEach((pl, pi) => {
+      renderDraftItems(pi);
+    });
+
+    plansEl.querySelectorAll('[data-replaceplan]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const pi = Number(btn.dataset.replaceplan);
+        choosePlanSource('Replace plan', ({name, items}) => {
+          _reviewDraft[pi] = { id: uuid(), name, items: (items||[]).map(it => Object.assign({}, it, { itemId: uuid(), targetSets: (it.targetSets||[]).map(s=>Object.assign({},s)), reviewNote:'' })) };
+          renderDraft();
+        });
+      });
+    });
+    plansEl.querySelectorAll('[data-removeplan]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const pi = Number(btn.dataset.removeplan);
+        if (!confirm(`Drop "${_reviewDraft[pi].name}" from the next programme?`)) return;
+        _reviewDraft.splice(pi, 1);
+        renderDraft();
+      });
+    });
+    plansEl.querySelectorAll('[data-addex]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const pi = Number(btn.dataset.addex);
+        openItemSheet(null, (item) => {
+          item.reviewNote = '';
+          _reviewDraft[pi].items.push(item);
+          renderDraftItems(pi);
+        });
+      });
+    });
+  }
+
+  function renderDraftItems(pi){
+    const container = draftZone.querySelector(`#ssDraftItems-${pi}`);
+    if (!container) return;
+    const items = _reviewDraft[pi].items;
+    if (!items.length){
+      container.innerHTML = '<div class="cMeta">No exercises in this plan.</div>';
+      return;
+    }
+    container.innerHTML = items.map((it, ii) => `
+      <div style="border-top:1px solid var(--line);padding:8px 0;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+          <div>
+            <div class="cName" style="font-size:14px;">${escHtml(it.exerciseName)}</div>
+            <div class="cMeta">${escHtml(itemSummary(it))}</div>
+          </div>
+          <div style="display:flex;gap:4px;flex-shrink:0;">
+            <button type="button" class="iconBtn" data-edittarget="${ii}" title="Adjust target">✎</button>
+            <button type="button" class="iconBtn" data-removeex="${ii}" title="Remove">✕</button>
+          </div>
+        </div>
+        <input type="text" data-notefor="${ii}" value="${escHtml(it.reviewNote)}" placeholder="Note any changes or issues for this exercise…" style="width:100%;margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:14px;">
+      </div>
+    `).join('');
+    container.querySelectorAll('[data-notefor]').forEach(inp => {
+      inp.addEventListener('input', () => { items[Number(inp.dataset.notefor)].reviewNote = inp.value; });
+    });
+    container.querySelectorAll('[data-edittarget]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const ii = Number(btn.dataset.edittarget);
+        openItemSheet(items[ii], (updated) => {
+          updated.reviewNote = items[ii].reviewNote; // preserve the note through the edit
+          items[ii] = updated;
+          renderDraftItems(pi);
+        });
+      });
+    });
+    container.querySelectorAll('[data-removeex]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        items.splice(Number(btn.dataset.removeex), 1);
+        renderDraftItems(pi);
+      });
+    });
+  }
+
+  renderDraft();
+  renderNewProgRow();
+
+  backdrop.querySelector('#ssProg').addEventListener('change', (e) => {
+    session.programmeId = e.target.value || null;
+    _reviewDraft = buildReviewDraft(allPrograms().find(p => p.id === session.programmeId));
+    renderDraft();
+    renderNewProgRow();
+  });
 
   const itemListEl = backdrop.querySelector('#ssItemList');
   const refreshItems = () => renderItemList(itemListEl, session.items,
@@ -1634,7 +1778,6 @@ function openSessionSheet(client, existingSession, parentBody){
     const date = backdrop.querySelector('#ssDate').value;
     if (!date){ toast('Pick a date'); return false; }
     session.date = date;
-    session.programmeId = backdrop.querySelector('#ssProg').value || null;
     session.reviewNotes = backdrop.querySelector('#ssReview').value;
     session.progressionNotes = backdrop.querySelector('#ssProgression').value;
     session.updatedAt = new Date().toISOString();
@@ -1661,13 +1804,14 @@ function openSessionSheet(client, existingSession, parentBody){
     renderClientSessionsTab(parentBody, client);
     toast('Session deleted');
   });
-  const newProgBtn = backdrop.querySelector('#ssNewProg');
-  if (newProgBtn) newProgBtn.addEventListener('click', () => {
+
+  // Builds the next programme from the (possibly edited) review draft —
+  // adjusted targets, added exercises, and replaced/removed/added plans
+  // all carry through, rather than a blind duplicate of the old programme.
+  function onCreateNextProgramme(){
     const sourceProg = allPrograms().find(p => p.id === session.programmeId);
     if (!sourceProg){ toast('Programme not found'); return; }
     if (!persist()) return;
-    // Duplicate the reviewed programme (all its plans) as the client's new
-    // active one — the natural next step after deciding how to progress it.
     if (sourceProg.status === 'active'){
       sourceProg.status = 'archived'; sourceProg.updatedAt = new Date().toISOString();
       persistAndSync('pt_programs', 'programs', sourceProg);
@@ -1676,9 +1820,13 @@ function openSessionSheet(client, existingSession, parentBody){
       id: uuid(), kind:'programme', clientId: client.id, name: sourceProg.name, notes: sourceProg.notes||'',
       startDate: todayISO(), durationWeeks: sourceProg.durationWeeks || null,
       status:'active',
-      plans: (sourceProg.plans||[]).map(pl => ({
+      plans: _reviewDraft.map(pl => ({
         id: uuid(), name: pl.name,
-        items: (pl.items||[]).map(it => Object.assign({}, it, { itemId: uuid(), targetSets: (it.targetSets||[]).map(s=>Object.assign({},s)) }))
+        items: pl.items.map(it => {
+          const clean = Object.assign({}, it, { itemId: uuid(), targetSets: (it.targetSets||[]).map(s=>Object.assign({},s)) });
+          delete clean.reviewNote; // was working notes for this review only, not a programme field
+          return clean;
+        })
       })),
       createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
     };
@@ -1688,8 +1836,10 @@ function openSessionSheet(client, existingSession, parentBody){
     backdrop.remove();
     toast('New programme created from this review — edit it in the Programme tab');
     renderClientSessionsTab(parentBody, client);
-  });
+  }
 }
+
+// ---- Client Insights tab (progression + adherence) ---------------------
 
 // ---- Client Insights tab (progression + adherence) ---------------------
 // Best single number per session for a given exercise, used to plot a
