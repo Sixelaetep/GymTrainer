@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.1</title>
-<!-- PT Companion — version 2.1 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.2</title>
+<!-- PT Companion — version 2.2 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -142,6 +142,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   font-size:13px;font-weight:600;
 }
 .tagChip.on{background:var(--amber);color:var(--ink);border-color:var(--amber);}
+
+.pillResult{
+  display:flex;flex-direction:column;align-items:flex-start;gap:2px;
+  width:100%;text-align:left;padding:10px 14px;margin-bottom:6px;border-radius:12px;
+  border:1px solid var(--line);background:var(--ink-soft);color:var(--chalk);
+}
+.pillResult .prName{font-weight:600;font-size:14.5px;}
+.pillResult .prMeta{font-size:11.5px;color:var(--chalk-dim);}
+.pillResult.pillCreate{color:var(--amber);font-weight:600;border-style:dashed;}
+
+.setRow{display:flex;align-items:center;gap:6px;margin-bottom:8px;}
+.setRow .setIdx{font-size:11px;color:var(--chalk-dim);width:16px;flex-shrink:0;}
+.setRow input{
+  flex:1;min-width:0;padding:9px 8px;border-radius:8px;border:1px solid var(--line);
+  background:var(--ink);color:var(--chalk);font-size:15px;
+}
 .badge.active{background:rgba(76,140,107,0.18);color:var(--good);}
 .badge.archived{background:rgba(255,255,255,0.08);color:var(--chalk-dim);}
 
@@ -270,13 +286,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.1</div>
+  <div class="loginVersion" id="loginVersion">v2.2</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.1</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.2</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -306,16 +322,19 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.1';
-// v2.1: Exercise/tag library, ported from Gym Tracker v2.57's starter data
-// (65 exercises, 29 body-area tags across 8 groups — Spa excluded, not
-// relevant to PT programming). New: reusable tags with body-area assignment
-// (new pt_tags table — run the v2.1 SQL add-on), exercise model now uses
-// trackType (reps/distance/time) + multi-tag chips instead of the old
-// single strength/cardio/mobility/other field. v2.0 exercises migrate
-// automatically and non-destructively on load. "Load starter library"
-// buttons on both Exercises and Tags tabs seed the data on demand
-// (dedupes by name, safe to run more than once).
+const VERSION = '2.2';
+// v2.2: Exercise picker & structured sets, matching Gym Tracker's actual
+// UX/data model more closely. The exercise dropdown (unusable at 65+
+// entries) is replaced with a live search returning tappable pill results
+// (name, trackType, top tags), plus a "+ Create as new exercise" pill when
+// there's no exact match — mirrors Gym Tracker's session-search pattern.
+// Target sets are no longer one free-text sets/reps/weight per item —
+// each item now holds an array of individual target sets, fields adapting
+// to the exercise's trackType (reps: reps+weight; time: min:sec;
+// distance: metres+min:sec+optional weight), with add/remove per set —
+// matching Gym Tracker's targetSets model. v2.0/v2.1 items migrate
+// automatically; anything that couldn't be cleanly parsed (e.g. "8-12"
+// rep ranges) is preserved in the item's notes rather than dropped.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -399,6 +418,7 @@ function load(){
     parsed.data.programs  = Array.isArray(parsed.data.programs)  ? parsed.data.programs  : [];
     parsed.data.tags      = Array.isArray(parsed.data.tags)      ? parsed.data.tags      : [];
     migrateLegacyExercises(parsed.data.exercises);
+    migrateLegacyProgramItems(parsed.data.programs);
     return parsed;
   }catch(e){
     console.error('Local envelope load failed, starting fresh:', e);
@@ -578,6 +598,9 @@ async function pullAll(){
   await pullTable('pt_exercises', 'exercises');
   await pullTable('pt_programs', 'programs');
   await pullTable('pt_tags', 'tags');
+  migrateLegacyExercises(_env.data.exercises);
+  migrateLegacyProgramItems(_env.data.programs);
+  save(_env);
   _syncState = 'ok'; renderSyncStatus();
 }
 
@@ -764,12 +787,22 @@ function templates(){ return allPrograms().filter(p => !p._deleted && p.kind ===
 function clientProgrammes(clientId){ return allPrograms().filter(p => !p._deleted && p.kind==='client' && p.clientId===clientId); }
 function activeProgrammeFor(clientId){ return clientProgrammes(clientId).find(p => p.status === 'active'); }
 
+function fmtMinSec(seconds){
+  seconds = Number(seconds)||0;
+  const m = Math.floor(seconds/60), s = seconds%60;
+  return m>0 ? `${m}:${String(s).padStart(2,'0')}` : `${s}s`;
+}
 function itemSummary(item){
-  const parts = [];
-  if (item.sets) parts.push(item.sets + ' sets');
-  if (item.reps) parts.push(item.reps + ' reps');
-  if (item.weight) parts.push(item.weight);
-  return parts.length ? parts.join(' · ') : (item.notes || 'No target set');
+  const sets = item.targetSets || [];
+  if (!sets.length) return item.notes || 'No target set';
+  const n = sets.length;
+  if (item.trackType === 'time'){
+    return `${n} set${n===1?'':'s'} · ${sets.map(s=>fmtMinSec(s.seconds)).join(', ')}`;
+  }
+  if (item.trackType === 'distance'){
+    return `${n} set${n===1?'':'s'} · ${sets.map(s=>`${s.metres||0}m in ${fmtMinSec(s.seconds)}`).join(', ')}`;
+  }
+  return `${n} set${n===1?'':'s'} · ${sets.map(s=>`${s.reps||0}${s.weight?'×'+s.weight+'kg':''}`).join(', ')}`;
 }
 
 function renderItemList(container, items, onEdit, onRemove){
@@ -797,46 +830,205 @@ function renderItemList(container, items, onEdit, onRemove){
   });
 }
 
+function defaultSetForType(type){
+  return type==='distance' ? {metres:1000, seconds:300, weight:0} : type==='time' ? {seconds:30} : {reps:10, weight:0};
+}
+
 // Opens a stacked sheet to add/edit one exercise-assignment within a
 // programme or template. `onSave` receives the finished item.
 function openItemSheet(existingItem, onSave){
-  const exercises = activeExercises();
-  const item = existingItem ? Object.assign({}, existingItem) : { itemId: uuid(), exerciseId:'', exerciseName:'', sets:'', reps:'', weight:'', notes:'' };
+  const item = existingItem ? JSON.parse(JSON.stringify(existingItem)) : { itemId: uuid(), exerciseId:'', exerciseName:'', trackType:'reps', targetSets:[], notes:'' };
   const backdrop = document.createElement('div');
   backdrop.className = 'sheetBackdrop';
   backdrop.innerHTML = `
     <div class="sheet">
       <div class="sheetHandle"></div>
       <div class="sheetHeader"><h2>${existingItem ? 'Edit exercise' : 'Add exercise'}</h2><button class="iconBtn" data-close>✕</button></div>
-      <div class="field"><label>Exercise</label>
-        <select id="ifExercise" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
-          <option value="">Choose an exercise…</option>
-          ${exercises.map(ex => `<option value="${escHtml(ex.id)}" ${ex.id===item.exerciseId?'selected':''}>${escHtml(ex.name)}</option>`).join('')}
-        </select>
-      </div>
-      ${!exercises.length ? '<div class="loginVersion" style="opacity:0.8;">No exercises yet — add one in the Exercises tab first.</div>' : ''}
-      <div class="field"><label>Sets</label><input id="ifSets" type="text" inputmode="numeric" value="${escHtml(item.sets)}" placeholder="e.g. 3"></div>
-      <div class="field"><label>Reps</label><input id="ifReps" type="text" value="${escHtml(item.reps)}" placeholder="e.g. 8-12"></div>
-      <div class="field"><label>Weight / load</label><input id="ifWeight" type="text" value="${escHtml(item.weight)}" placeholder="e.g. 20kg or bodyweight"></div>
-      <div class="field"><label>Notes / tempo</label><input id="ifNotes" type="text" value="${escHtml(item.notes)}" placeholder="e.g. 3 sec eccentric"></div>
-      <div class="rowActions"><button class="btnAmber" id="ifSave">${existingItem ? 'Save' : 'Add to programme'}</button></div>
+      <div id="ifPickerZone"></div>
+      <div id="ifSetsZone"></div>
+      <div class="rowActions"><button class="btnAmber" id="ifSave" disabled>${existingItem ? 'Save' : 'Add to programme'}</button></div>
     </div>
   `;
   document.body.appendChild(backdrop);
   backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
   backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
-  backdrop.querySelector('#ifSave').addEventListener('click', () => {
-    const exId = backdrop.querySelector('#ifExercise').value;
-    if (!exId){ toast('Choose an exercise'); return; }
-    const ex = exercises.find(e => e.id === exId);
-    item.exerciseId = exId;
-    item.exerciseName = ex ? ex.name : item.exerciseName;
-    item.sets = backdrop.querySelector('#ifSets').value.trim();
-    item.reps = backdrop.querySelector('#ifReps').value.trim();
-    item.weight = backdrop.querySelector('#ifWeight').value.trim();
-    item.notes = backdrop.querySelector('#ifNotes').value.trim();
+
+  const pickerZone = backdrop.querySelector('#ifPickerZone');
+  const setsZone = backdrop.querySelector('#ifSetsZone');
+  const saveBtn = backdrop.querySelector('#ifSave');
+
+  function renderPicked(){
+    saveBtn.disabled = !item.exerciseId;
+    pickerZone.innerHTML = `
+      <div class="field"><label>Exercise</label>
+        <div class="clientCard" style="margin-bottom:4px;">
+          <div><div class="cName">${escHtml(item.exerciseName)}</div><div class="cMeta">Tracked as ${escHtml(item.trackType)}</div></div>
+          <button class="iconBtn" id="ifChangeEx" title="Change exercise">✎</button>
+        </div>
+      </div>
+    `;
+    pickerZone.querySelector('#ifChangeEx').addEventListener('click', renderSearch);
+    renderSets();
+  }
+
+  function renderSearch(){
+    saveBtn.disabled = true;
+    setsZone.innerHTML = '';
+    pickerZone.innerHTML = `
+      <div class="field"><label>Find exercise</label><input id="ifSearch" type="text" placeholder="Search by name or tag…" autocomplete="off"></div>
+      <div id="ifResults"></div>
+    `;
+    const searchEl = pickerZone.querySelector('#ifSearch');
+    const resultsEl = pickerZone.querySelector('#ifResults');
+    function renderResults(){
+      const q = searchEl.value.trim().toLowerCase();
+      if (!q){ resultsEl.innerHTML = '<div class="cMeta" style="padding:6px 2px;">Type to search your exercise library…</div>'; return; }
+      const matches = activeExercises()
+        .filter(e => e.name.toLowerCase().includes(q) || (e.tags||[]).some(t=>t.toLowerCase().includes(q)))
+        .slice(0, 8);
+      const exactMatch = activeExercises().some(e => e.name.toLowerCase() === q);
+      let html = matches.map(e => `
+        <button type="button" class="pillResult" data-id="${escHtml(e.id)}">
+          <span class="prName">${escHtml(e.name)}</span>
+          <span class="prMeta">${escHtml(e.trackType||'reps')}${(e.tags&&e.tags.length) ? ' · '+escHtml(e.tags.slice(0,3).join(', ')) : ''}</span>
+        </button>
+      `).join('');
+      if (!matches.length) html += '<div class="cMeta" style="padding:6px 2px;">No matches.</div>';
+      if (!exactMatch){
+        html += `<button type="button" class="pillResult pillCreate" id="ifCreateNew">+ Create "${escHtml(searchEl.value.trim())}" as new exercise</button>`;
+      }
+      resultsEl.innerHTML = html;
+      resultsEl.querySelectorAll('.pillResult[data-id]').forEach(btn => {
+        btn.addEventListener('click', () => selectExercise(btn.dataset.id));
+      });
+      const createBtn = resultsEl.querySelector('#ifCreateNew');
+      if (createBtn) createBtn.addEventListener('click', () => quickCreateExercise(searchEl.value.trim()));
+    }
+    searchEl.addEventListener('input', renderResults);
+    renderResults();
+    searchEl.focus();
+  }
+
+  function selectExercise(exId){
+    const ex = activeExercises().find(e => e.id === exId);
+    if (!ex) return;
+    const typeChanged = item.exerciseId && item.trackType !== ex.trackType;
+    item.exerciseId = ex.id;
+    item.exerciseName = ex.name;
+    if (typeChanged || !item.targetSets.length){
+      item.trackType = ex.trackType;
+      item.targetSets = [defaultSetForType(ex.trackType)];
+    }
+    renderPicked();
+  }
+
+  // Quick-create: opens the real exercise sheet pre-filled with the search
+  // term, then selects the new exercise here once saved — no need to leave
+  // this screen and lose progress on the item you were building.
+  function quickCreateExercise(name){
+    openExerciseSheetInline(name, (newEx) => { selectExercise(newEx.id); });
+  }
+
+  function renderSets(){
+    const sets = item.targetSets;
+    const type = item.trackType;
+    const rows = sets.map((s, si) => {
+      if (type === 'distance'){
+        return `<div class="setRow" data-si="${si}">
+          <span class="setIdx">${si+1}</span>
+          <input type="number" min="0" placeholder="metres" value="${s.metres||''}" data-f="metres">
+          <input type="number" min="0" placeholder="min" style="max-width:64px" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
+          <input type="number" min="0" max="59" placeholder="sec" style="max-width:64px" value="${(s.seconds||0)%60}" data-f="sec">
+          <input type="number" min="0" step="0.5" placeholder="kg (opt)" value="${s.weight||''}" data-f="weight">
+          <button type="button" class="iconBtn" data-remove="${si}">✕</button>
+        </div>`;
+      }
+      if (type === 'time'){
+        return `<div class="setRow" data-si="${si}">
+          <span class="setIdx">${si+1}</span>
+          <input type="number" min="0" placeholder="min" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
+          <input type="number" min="0" max="59" placeholder="sec" value="${(s.seconds||0)%60}" data-f="sec">
+          <button type="button" class="iconBtn" data-remove="${si}">✕</button>
+        </div>`;
+      }
+      return `<div class="setRow" data-si="${si}">
+        <span class="setIdx">${si+1}</span>
+        <input type="number" min="0" placeholder="reps" value="${s.reps||''}" data-f="reps">
+        <input type="number" min="0" step="0.5" placeholder="kg" value="${s.weight||''}" data-f="weight">
+        <button type="button" class="iconBtn" data-remove="${si}">✕</button>
+      </div>`;
+    }).join('');
+    setsZone.innerHTML = `
+      <div class="field"><label>Target sets</label><div id="ifSetRows">${rows}</div>
+        <div class="rowActions"><button type="button" class="btnGhost" id="ifAddSet">+ Add set</button></div>
+      </div>
+      <div class="field"><label>Coaching notes for this exercise (optional)</label><input id="ifNotes" type="text" value="${escHtml(item.notes)}" placeholder="e.g. 3 sec eccentric, wide grip"></div>
+    `;
+    setsZone.querySelectorAll('.setRow input').forEach(inp => {
+      inp.addEventListener('input', () => {
+        const si = Number(inp.closest('.setRow').dataset.si);
+        const field = inp.dataset.f;
+        const set = sets[si];
+        if (field === 'min'){ const sec=(set.seconds||0)%60; set.seconds = (Number(inp.value)||0)*60 + sec; }
+        else if (field === 'sec'){ const min=Math.floor((set.seconds||0)/60); set.seconds = min*60 + (Number(inp.value)||0); }
+        else { set[field] = inp.type==='number' ? (inp.value===''?0:Number(inp.value)) : inp.value; }
+      });
+    });
+    setsZone.querySelectorAll('[data-remove]').forEach(btn => {
+      btn.addEventListener('click', () => { sets.splice(Number(btn.dataset.remove),1); renderSets(); });
+    });
+    setsZone.querySelector('#ifAddSet').addEventListener('click', () => {
+      const last = sets[sets.length-1];
+      sets.push(last ? Object.assign({}, last) : defaultSetForType(type));
+      renderSets();
+    });
+    setsZone.querySelector('#ifNotes').addEventListener('input', e => { item.notes = e.target.value; });
+  }
+
+  if (item.exerciseId) renderPicked(); else renderSearch();
+
+  saveBtn.addEventListener('click', () => {
+    if (!item.exerciseId){ toast('Choose an exercise'); return; }
     onSave(item);
     backdrop.remove();
+  });
+}
+
+// Minimal inline exercise-creation used by the quick-create pill above —
+// same pt_exercises record shape as the full Exercises tab editor, just a
+// faster path so a trainer building a programme never has to bail out to
+// a different tab mid-flow.
+function openExerciseSheetInline(name, onCreated){
+  const ex = { id: uuid(), name, trackType:'reps', tags:[], notes:'', status:'active', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>New exercise</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="field"><label>Name</label><input id="qeName" type="text" value="${escHtml(name)}"></div>
+      <div class="field"><label>Tracked as</label>
+        <select id="qeTrackType" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          <option value="reps">Reps</option><option value="time">Time</option><option value="distance">Distance</option>
+        </select>
+      </div>
+      <div class="rowActions"><button class="btnAmber" id="qeSave">Create & select</button></div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#qeSave').addEventListener('click', () => {
+    const n = backdrop.querySelector('#qeName').value.trim();
+    if (!n){ toast('Name is required'); return; }
+    ex.name = n;
+    ex.trackType = backdrop.querySelector('#qeTrackType').value;
+    _env.data.exercises = _env.data.exercises || [];
+    _env.data.exercises.push(ex);
+    persistAndSync('pt_exercises', 'exercises', ex);
+    backdrop.remove();
+    toast('Exercise created — add tags any time from the Exercises tab');
+    onCreated(ex);
   });
 }
 
@@ -932,7 +1124,10 @@ function assignTemplateToClient(client, template){
   }
   const prog = {
     id: uuid(), kind:'client', clientId: client.id, name: template.name, notes: template.notes || '',
-    status:'active', items: template.items.map(it => Object.assign({}, it, { itemId: uuid() })),
+    status:'active', items: template.items.map(it => Object.assign({}, it, {
+      itemId: uuid(),
+      targetSets: (it.targetSets||[]).map(s => Object.assign({}, s))
+    })),
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
   };
   _env.data.programs = _env.data.programs || [];
@@ -1158,6 +1353,35 @@ function migrateLegacyExercises(exercises){
   });
 }
 
+// One-time, non-destructive migration for programme/template items created
+// in v2.0/v2.1, which stored a single free-text sets/reps/weight per item
+// instead of an array of individual target sets. Best-effort numeric parse;
+// anything that can't be cleanly parsed is preserved in the item's notes
+// rather than silently dropped.
+function migrateLegacyProgramItems(programs){
+  (programs||[]).forEach(p => {
+    (p.items||[]).forEach(item => {
+      if (Array.isArray(item.targetSets)) return; // already v2.2+
+      if (!item.trackType) item.trackType = 'reps';
+      const setCount = parseInt(item.sets, 10) || 1;
+      const repsNum = parseInt(item.reps, 10);
+      const weightNum = parseFloat(item.weight);
+      const built = [];
+      for (let i=0; i<setCount; i++){
+        if (item.trackType === 'time') built.push({ seconds: 0 });
+        else if (item.trackType === 'distance') built.push({ metres:0, seconds:0, weight: isNaN(weightNum)?0:weightNum });
+        else built.push({ reps: isNaN(repsNum)?0:repsNum, weight: isNaN(weightNum)?0:weightNum });
+      }
+      item.targetSets = built;
+      const legacyBits = [item.sets && `${item.sets} sets`, item.reps && `${item.reps} reps`, item.weight].filter(Boolean).join(', ');
+      if (legacyBits && (isNaN(repsNum) || isNaN(weightNum))){
+        item.notes = (item.notes ? item.notes + ' — ' : '') + `(was: ${legacyBits})`;
+      }
+      delete item.sets; delete item.reps; delete item.weight;
+    });
+  });
+}
+
 // ---- Tags CRUD ---------------------------------------------------------
 function activeTags(){ return (_env.data.tags||[]).filter(t => !t._deleted); }
 
@@ -1291,7 +1515,7 @@ function openExerciseSheet(id){
         </select>
       </div>
       <div class="field"><label>Tags (body areas)</label><div id="efTagChips"></div></div>
-      <div class="field"><label>Notes</label><textarea id="efNotes" class="notesArea">${escHtml(ex.notes)}</textarea></div>
+      <div class="field"><label>How to perform (notes)</label><textarea id="efNotes" class="notesArea" placeholder="Cues, technique, setup instructions…">${escHtml(ex.notes)}</textarea></div>
       ${!isNew ? `<div class="field"><label>Status</label>
         <select id="efStatus" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
           <option value="active" ${ex.status==='active'?'selected':''}>Active</option>
