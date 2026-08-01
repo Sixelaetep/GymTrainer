@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.3</title>
-<!-- PT Companion — version 2.3 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.4</title>
+<!-- PT Companion — version 2.4 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -290,13 +290,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.3</div>
+  <div class="loginVersion" id="loginVersion">v2.4</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.3</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.4</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -325,20 +325,19 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.3';
-// v2.3: Restored Gym Tracker's actual exercise/tag workflow, which v2.1's
-// separate Tags tab had made slower (an extra screen to leave and return
-// from mid-edit). Reverted to 3 bottom-nav tabs. Tags now manage inline
-// from the exercise editor: grouped-by-body-area toggle chips (matching
-// Gym Tracker's TAG_GROUPS presentation) with a selected-tags summary row,
-// plus an inline "add new tag" mini-form (name + body area) that creates
-// and auto-selects a tag without leaving the exercise sheet. A lightweight
-// "Manage tags" sheet (reachable from the Exercises tab) still exists for
-// bulk rename/delete. Exercise list also gained Gym Tracker's body-area
-// filter chips (All/Chest/Back/.../Other) above the search box, and tag
-// badges under each exercise name instead of a plain comma-joined line.
-// No visual/colour changes — Pete confirmed workflow was the actual ask,
-// not matching Gym Tracker's design system.
+const VERSION = '2.4';
+// v2.4: Sessions & Insights. Session logging is freeform — pick any
+// exercise via the same search+pill picker used for programmes, log actual
+// sets (reps/weight, time, or distance depending on the exercise), see the
+// client's current programme target as a passive reference if one exists
+// for that exercise. Insights tab: adherence summary (total sessions,
+// sessions in the last 30 days, days since last session) plus a
+// progression sparkline per exercise once it's been logged in 2+ sessions
+// — reps exercises track heaviest weight (or most reps if unweighted),
+// time exercises track longest duration, distance exercises track
+// furthest distance. Refactored the shared exercise-picker and
+// per-type set-builder out of the programme item editor so sessions
+// reuse the exact same tested UI rather than duplicating it.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -405,7 +404,7 @@ async function sbFetch(path, options={}){
 // Backwards-compatible: a v1.6 backup with only `clients` still loads fine —
 // exercises/programs default to empty arrays rather than failing.
 function defaultEnv(){
-  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [] } };
+  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [], sessions: [] } };
 }
 let _env = load();
 let _envGeneration = 0; // guards against a stale in-flight pull overwriting a fresher import/replace
@@ -421,6 +420,7 @@ function load(){
     parsed.data.exercises = Array.isArray(parsed.data.exercises) ? parsed.data.exercises : [];
     parsed.data.programs  = Array.isArray(parsed.data.programs)  ? parsed.data.programs  : [];
     parsed.data.tags      = Array.isArray(parsed.data.tags)      ? parsed.data.tags      : [];
+    parsed.data.sessions  = Array.isArray(parsed.data.sessions)  ? parsed.data.sessions  : [];
     migrateLegacyExercises(parsed.data.exercises);
     migrateLegacyProgramItems(parsed.data.programs);
     return parsed;
@@ -602,6 +602,7 @@ async function pullAll(){
   await pullTable('pt_exercises', 'exercises');
   await pullTable('pt_programs', 'programs');
   await pullTable('pt_tags', 'tags');
+  await pullTable('pt_sessions', 'sessions');
   migrateLegacyExercises(_env.data.exercises);
   migrateLegacyProgramItems(_env.data.programs);
   save(_env);
@@ -708,8 +709,8 @@ function openClientSheet(id){
       <div class="tabRow" id="clientTabRow">
         <button class="tabBtn active" data-ctab="overview">Overview</button>
         <button class="tabBtn" data-ctab="programme" ${isNew?'disabled title="Save the client first"':''}>Programme</button>
-        <button class="tabBtn" disabled title="Coming in a future release">Sessions</button>
-        <button class="tabBtn" disabled title="Coming in a future release">Insights</button>
+        <button class="tabBtn" data-ctab="sessions" ${isNew?'disabled title="Save the client first"':''}>Sessions</button>
+        <button class="tabBtn" data-ctab="insights" ${isNew?'disabled title="Save the client first"':''}>Insights</button>
       </div>
       <div id="clientSheetBody"></div>
     </div>
@@ -777,6 +778,10 @@ function renderClientSheetBody(backdrop, client, isNew, tab){
     }
   } else if (tab === 'programme'){
     renderClientProgrammeTab(body, client);
+  } else if (tab === 'sessions'){
+    renderClientSessionsTab(body, client);
+  } else if (tab === 'insights'){
+    renderClientInsightsTab(body, client);
   }
 }
 
@@ -794,8 +799,9 @@ function fmtMinSec(seconds){
   const m = Math.floor(seconds/60), s = seconds%60;
   return m>0 ? `${m}:${String(s).padStart(2,'0')}` : `${s}s`;
 }
-function itemSummary(item){
-  const sets = item.targetSets || [];
+function itemSummary(item, setsKey){
+  setsKey = setsKey || 'targetSets';
+  const sets = item[setsKey] || [];
   if (!sets.length) return item.notes || 'No target set';
   const n = sets.length;
   if (item.trackType === 'time'){
@@ -807,7 +813,7 @@ function itemSummary(item){
   return `${n} set${n===1?'':'s'} · ${sets.map(s=>`${s.reps||0}${s.weight?'×'+s.weight+'kg':''}`).join(', ')}`;
 }
 
-function renderItemList(container, items, onEdit, onRemove){
+function renderItemList(container, items, onEdit, onRemove, setsKey){
   if (!items.length){
     container.innerHTML = '<div class="emptyState" style="padding:24px 10px;">No exercises added yet.</div>';
     return;
@@ -816,7 +822,7 @@ function renderItemList(container, items, onEdit, onRemove){
     <div class="clientCard" data-idx="${idx}" style="margin-bottom:8px;">
       <div>
         <div class="cName">${escHtml(it.exerciseName)}</div>
-        <div class="cMeta">${escHtml(itemSummary(it))}</div>
+        <div class="cMeta">${escHtml(itemSummary(it, setsKey))}</div>
       </div>
       <button class="iconBtn" data-remove="${idx}" title="Remove">✕</button>
     </div>
@@ -836,6 +842,103 @@ function defaultSetForType(type){
   return type==='distance' ? {metres:1000, seconds:300, weight:0} : type==='time' ? {seconds:30} : {reps:10, weight:0};
 }
 
+// Shared exercise search+pick UI (search box, tappable pill results, quick-
+// create). Used by both the programme/template item editor and session
+// logging — identical interaction, different things happen after picking.
+function renderExerciseSearchPicker(zone, onPick){
+  zone.innerHTML = `
+    <div class="field"><label>Find exercise</label><input id="epSearch" type="text" placeholder="Search by name or tag…" autocomplete="off"></div>
+    <div id="epResults"></div>
+  `;
+  const searchEl = zone.querySelector('#epSearch');
+  const resultsEl = zone.querySelector('#epResults');
+  function renderResults(){
+    const q = searchEl.value.trim().toLowerCase();
+    if (!q){ resultsEl.innerHTML = '<div class="cMeta" style="padding:6px 2px;">Type to search your exercise library…</div>'; return; }
+    const matches = activeExercises()
+      .filter(e => e.name.toLowerCase().includes(q) || (e.tags||[]).some(t=>t.toLowerCase().includes(q)))
+      .slice(0, 8);
+    const exactMatch = activeExercises().some(e => e.name.toLowerCase() === q);
+    let html = matches.map(e => `
+      <button type="button" class="pillResult" data-id="${escHtml(e.id)}">
+        <span class="prName">${escHtml(e.name)}</span>
+        <span class="prMeta">${escHtml(e.trackType||'reps')}${(e.tags&&e.tags.length) ? ' · '+escHtml(e.tags.slice(0,3).join(', ')) : ''}</span>
+      </button>
+    `).join('');
+    if (!matches.length) html += '<div class="cMeta" style="padding:6px 2px;">No matches.</div>';
+    if (!exactMatch){
+      html += `<button type="button" class="pillResult pillCreate" id="epCreateNew">+ Create "${escHtml(searchEl.value.trim())}" as new exercise</button>`;
+    }
+    resultsEl.innerHTML = html;
+    resultsEl.querySelectorAll('.pillResult[data-id]').forEach(btn => {
+      btn.addEventListener('click', () => onPick(activeExercises().find(e=>e.id===btn.dataset.id)));
+    });
+    const createBtn = resultsEl.querySelector('#epCreateNew');
+    if (createBtn) createBtn.addEventListener('click', () => {
+      openExerciseSheetInline(searchEl.value.trim(), (newEx) => onPick(newEx));
+    });
+  }
+  searchEl.addEventListener('input', renderResults);
+  renderResults();
+  searchEl.focus();
+}
+
+// Shared per-set-type builder (reps: reps+weight; time: min:sec;
+// distance: metres+min:sec+optional weight), add/remove per set. Used for
+// both a programme's target sets and a session's actual sets — `setsLabel`
+// distinguishes them in the UI; `sets` is mutated in place.
+function renderSetBuilder(zone, sets, trackType, setsLabel){
+  const rows = sets.map((s, si) => {
+    if (trackType === 'distance'){
+      return `<div class="setRow" data-si="${si}">
+        <span class="setIdx">${si+1}</span>
+        <input type="number" min="0" placeholder="metres" value="${s.metres||''}" data-f="metres">
+        <input type="number" min="0" placeholder="min" style="max-width:64px" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
+        <input type="number" min="0" max="59" placeholder="sec" style="max-width:64px" value="${(s.seconds||0)%60}" data-f="sec">
+        <input type="number" min="0" step="0.5" placeholder="kg (opt)" value="${s.weight||''}" data-f="weight">
+        <button type="button" class="iconBtn" data-remove="${si}">✕</button>
+      </div>`;
+    }
+    if (trackType === 'time'){
+      return `<div class="setRow" data-si="${si}">
+        <span class="setIdx">${si+1}</span>
+        <input type="number" min="0" placeholder="min" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
+        <input type="number" min="0" max="59" placeholder="sec" value="${(s.seconds||0)%60}" data-f="sec">
+        <button type="button" class="iconBtn" data-remove="${si}">✕</button>
+      </div>`;
+    }
+    return `<div class="setRow" data-si="${si}">
+      <span class="setIdx">${si+1}</span>
+      <input type="number" min="0" placeholder="reps" value="${s.reps||''}" data-f="reps">
+      <input type="number" min="0" step="0.5" placeholder="kg" value="${s.weight||''}" data-f="weight">
+      <button type="button" class="iconBtn" data-remove="${si}">✕</button>
+    </div>`;
+  }).join('');
+  zone.innerHTML = `
+    <div class="field"><label>${escHtml(setsLabel)}</label><div id="sbRows">${rows}</div>
+      <div class="rowActions"><button type="button" class="btnGhost" id="sbAddSet">+ Add set</button></div>
+    </div>
+  `;
+  zone.querySelectorAll('.setRow input').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const si = Number(inp.closest('.setRow').dataset.si);
+      const field = inp.dataset.f;
+      const set = sets[si];
+      if (field === 'min'){ const sec=(set.seconds||0)%60; set.seconds = (Number(inp.value)||0)*60 + sec; }
+      else if (field === 'sec'){ const min=Math.floor((set.seconds||0)/60); set.seconds = min*60 + (Number(inp.value)||0); }
+      else { set[field] = inp.type==='number' ? (inp.value===''?0:Number(inp.value)) : inp.value; }
+    });
+  });
+  zone.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', () => { sets.splice(Number(btn.dataset.remove),1); renderSetBuilder(zone, sets, trackType, setsLabel); });
+  });
+  zone.querySelector('#sbAddSet').addEventListener('click', () => {
+    const last = sets[sets.length-1];
+    sets.push(last ? Object.assign({}, last) : defaultSetForType(trackType));
+    renderSetBuilder(zone, sets, trackType, setsLabel);
+  });
+}
+
 // Opens a stacked sheet to add/edit one exercise-assignment within a
 // programme or template. `onSave` receives the finished item.
 function openItemSheet(existingItem, onSave){
@@ -848,6 +951,7 @@ function openItemSheet(existingItem, onSave){
       <div class="sheetHeader"><h2>${existingItem ? 'Edit exercise' : 'Add exercise'}</h2><button class="iconBtn" data-close>✕</button></div>
       <div id="ifPickerZone"></div>
       <div id="ifSetsZone"></div>
+      <div class="field" id="ifNotesField"></div>
       <div class="rowActions"><button class="btnAmber" id="ifSave" disabled>${existingItem ? 'Save' : 'Add to programme'}</button></div>
     </div>
   `;
@@ -857,7 +961,13 @@ function openItemSheet(existingItem, onSave){
 
   const pickerZone = backdrop.querySelector('#ifPickerZone');
   const setsZone = backdrop.querySelector('#ifSetsZone');
+  const notesField = backdrop.querySelector('#ifNotesField');
   const saveBtn = backdrop.querySelector('#ifSave');
+
+  function renderNotes(){
+    notesField.innerHTML = `<label>Coaching notes for this exercise (optional)</label><input id="ifNotes" type="text" value="${escHtml(item.notes)}" placeholder="e.g. 3 sec eccentric, wide grip">`;
+    notesField.querySelector('#ifNotes').addEventListener('input', e => { item.notes = e.target.value; });
+  }
 
   function renderPicked(){
     saveBtn.disabled = !item.exerciseId;
@@ -870,121 +980,107 @@ function openItemSheet(existingItem, onSave){
       </div>
     `;
     pickerZone.querySelector('#ifChangeEx').addEventListener('click', renderSearch);
-    renderSets();
+    renderSetBuilder(setsZone, item.targetSets, item.trackType, 'Target sets');
+    renderNotes();
   }
 
   function renderSearch(){
     saveBtn.disabled = true;
     setsZone.innerHTML = '';
+    notesField.innerHTML = '';
+    renderExerciseSearchPicker(pickerZone, (ex) => {
+      if (!ex) return;
+      const typeChanged = item.exerciseId && item.trackType !== ex.trackType;
+      item.exerciseId = ex.id;
+      item.exerciseName = ex.name;
+      if (typeChanged || !item.targetSets.length){
+        item.trackType = ex.trackType;
+        item.targetSets = [defaultSetForType(ex.trackType)];
+      }
+      renderPicked();
+    });
+  }
+
+  if (item.exerciseId) renderPicked(); else renderSearch();
+
+  saveBtn.addEventListener('click', () => {
+    if (!item.exerciseId){ toast('Choose an exercise'); return; }
+    onSave(item);
+    backdrop.remove();
+  });
+}
+
+// Session logging is freeform (pick any exercise, log what was actually
+// done) — same picker + set-builder as programme items, but saves as
+// `actualSets` and a lighter "session notes" label, and shows the client's
+// current programme target for this exercise as a passive reference when
+// one exists, without requiring the trainer to log against it.
+function openSessionItemSheet(existingItem, client, onSave){
+  const item = existingItem ? JSON.parse(JSON.stringify(existingItem)) : { itemId: uuid(), exerciseId:'', exerciseName:'', trackType:'reps', actualSets:[], notes:'' };
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>${existingItem ? 'Edit logged exercise' : 'Log exercise'}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div id="siPickerZone"></div>
+      <div id="siTargetRef"></div>
+      <div id="siSetsZone"></div>
+      <div class="field" id="siNotesField"></div>
+      <div class="rowActions"><button class="btnAmber" id="siSave" disabled>${existingItem ? 'Save' : 'Add to session'}</button></div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+
+  const pickerZone = backdrop.querySelector('#siPickerZone');
+  const targetRef = backdrop.querySelector('#siTargetRef');
+  const setsZone = backdrop.querySelector('#siSetsZone');
+  const notesField = backdrop.querySelector('#siNotesField');
+  const saveBtn = backdrop.querySelector('#siSave');
+
+  function renderNotes(){
+    notesField.innerHTML = `<label>Session notes for this exercise (optional)</label><input id="siNotes" type="text" value="${escHtml(item.notes)}" placeholder="e.g. felt strong, cut short">`;
+    notesField.querySelector('#siNotes').addEventListener('input', e => { item.notes = e.target.value; });
+  }
+
+  function renderTargetRef(){
+    const active = activeProgrammeFor(client.id);
+    const planned = active && active.items.find(i => i.exerciseId === item.exerciseId);
+    targetRef.innerHTML = planned ? `<div class="cMeta" style="margin-bottom:10px;">Programme target: ${escHtml(itemSummary(planned))}</div>` : '';
+  }
+
+  function renderPicked(){
+    saveBtn.disabled = !item.exerciseId;
     pickerZone.innerHTML = `
-      <div class="field"><label>Find exercise</label><input id="ifSearch" type="text" placeholder="Search by name or tag…" autocomplete="off"></div>
-      <div id="ifResults"></div>
-    `;
-    const searchEl = pickerZone.querySelector('#ifSearch');
-    const resultsEl = pickerZone.querySelector('#ifResults');
-    function renderResults(){
-      const q = searchEl.value.trim().toLowerCase();
-      if (!q){ resultsEl.innerHTML = '<div class="cMeta" style="padding:6px 2px;">Type to search your exercise library…</div>'; return; }
-      const matches = activeExercises()
-        .filter(e => e.name.toLowerCase().includes(q) || (e.tags||[]).some(t=>t.toLowerCase().includes(q)))
-        .slice(0, 8);
-      const exactMatch = activeExercises().some(e => e.name.toLowerCase() === q);
-      let html = matches.map(e => `
-        <button type="button" class="pillResult" data-id="${escHtml(e.id)}">
-          <span class="prName">${escHtml(e.name)}</span>
-          <span class="prMeta">${escHtml(e.trackType||'reps')}${(e.tags&&e.tags.length) ? ' · '+escHtml(e.tags.slice(0,3).join(', ')) : ''}</span>
-        </button>
-      `).join('');
-      if (!matches.length) html += '<div class="cMeta" style="padding:6px 2px;">No matches.</div>';
-      if (!exactMatch){
-        html += `<button type="button" class="pillResult pillCreate" id="ifCreateNew">+ Create "${escHtml(searchEl.value.trim())}" as new exercise</button>`;
-      }
-      resultsEl.innerHTML = html;
-      resultsEl.querySelectorAll('.pillResult[data-id]').forEach(btn => {
-        btn.addEventListener('click', () => selectExercise(btn.dataset.id));
-      });
-      const createBtn = resultsEl.querySelector('#ifCreateNew');
-      if (createBtn) createBtn.addEventListener('click', () => quickCreateExercise(searchEl.value.trim()));
-    }
-    searchEl.addEventListener('input', renderResults);
-    renderResults();
-    searchEl.focus();
-  }
-
-  function selectExercise(exId){
-    const ex = activeExercises().find(e => e.id === exId);
-    if (!ex) return;
-    const typeChanged = item.exerciseId && item.trackType !== ex.trackType;
-    item.exerciseId = ex.id;
-    item.exerciseName = ex.name;
-    if (typeChanged || !item.targetSets.length){
-      item.trackType = ex.trackType;
-      item.targetSets = [defaultSetForType(ex.trackType)];
-    }
-    renderPicked();
-  }
-
-  // Quick-create: opens the real exercise sheet pre-filled with the search
-  // term, then selects the new exercise here once saved — no need to leave
-  // this screen and lose progress on the item you were building.
-  function quickCreateExercise(name){
-    openExerciseSheetInline(name, (newEx) => { selectExercise(newEx.id); });
-  }
-
-  function renderSets(){
-    const sets = item.targetSets;
-    const type = item.trackType;
-    const rows = sets.map((s, si) => {
-      if (type === 'distance'){
-        return `<div class="setRow" data-si="${si}">
-          <span class="setIdx">${si+1}</span>
-          <input type="number" min="0" placeholder="metres" value="${s.metres||''}" data-f="metres">
-          <input type="number" min="0" placeholder="min" style="max-width:64px" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
-          <input type="number" min="0" max="59" placeholder="sec" style="max-width:64px" value="${(s.seconds||0)%60}" data-f="sec">
-          <input type="number" min="0" step="0.5" placeholder="kg (opt)" value="${s.weight||''}" data-f="weight">
-          <button type="button" class="iconBtn" data-remove="${si}">✕</button>
-        </div>`;
-      }
-      if (type === 'time'){
-        return `<div class="setRow" data-si="${si}">
-          <span class="setIdx">${si+1}</span>
-          <input type="number" min="0" placeholder="min" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
-          <input type="number" min="0" max="59" placeholder="sec" value="${(s.seconds||0)%60}" data-f="sec">
-          <button type="button" class="iconBtn" data-remove="${si}">✕</button>
-        </div>`;
-      }
-      return `<div class="setRow" data-si="${si}">
-        <span class="setIdx">${si+1}</span>
-        <input type="number" min="0" placeholder="reps" value="${s.reps||''}" data-f="reps">
-        <input type="number" min="0" step="0.5" placeholder="kg" value="${s.weight||''}" data-f="weight">
-        <button type="button" class="iconBtn" data-remove="${si}">✕</button>
-      </div>`;
-    }).join('');
-    setsZone.innerHTML = `
-      <div class="field"><label>Target sets</label><div id="ifSetRows">${rows}</div>
-        <div class="rowActions"><button type="button" class="btnGhost" id="ifAddSet">+ Add set</button></div>
+      <div class="field"><label>Exercise</label>
+        <div class="clientCard" style="margin-bottom:4px;">
+          <div><div class="cName">${escHtml(item.exerciseName)}</div><div class="cMeta">Tracked as ${escHtml(item.trackType)}</div></div>
+          <button class="iconBtn" id="siChangeEx" title="Change exercise">✎</button>
+        </div>
       </div>
-      <div class="field"><label>Coaching notes for this exercise (optional)</label><input id="ifNotes" type="text" value="${escHtml(item.notes)}" placeholder="e.g. 3 sec eccentric, wide grip"></div>
     `;
-    setsZone.querySelectorAll('.setRow input').forEach(inp => {
-      inp.addEventListener('input', () => {
-        const si = Number(inp.closest('.setRow').dataset.si);
-        const field = inp.dataset.f;
-        const set = sets[si];
-        if (field === 'min'){ const sec=(set.seconds||0)%60; set.seconds = (Number(inp.value)||0)*60 + sec; }
-        else if (field === 'sec'){ const min=Math.floor((set.seconds||0)/60); set.seconds = min*60 + (Number(inp.value)||0); }
-        else { set[field] = inp.type==='number' ? (inp.value===''?0:Number(inp.value)) : inp.value; }
-      });
+    pickerZone.querySelector('#siChangeEx').addEventListener('click', renderSearch);
+    renderTargetRef();
+    renderSetBuilder(setsZone, item.actualSets, item.trackType, 'Actual sets');
+    renderNotes();
+  }
+
+  function renderSearch(){
+    saveBtn.disabled = true;
+    setsZone.innerHTML = ''; targetRef.innerHTML = ''; notesField.innerHTML = '';
+    renderExerciseSearchPicker(pickerZone, (ex) => {
+      if (!ex) return;
+      const typeChanged = item.exerciseId && item.trackType !== ex.trackType;
+      item.exerciseId = ex.id;
+      item.exerciseName = ex.name;
+      if (typeChanged || !item.actualSets.length){
+        item.trackType = ex.trackType;
+        item.actualSets = [defaultSetForType(ex.trackType)];
+      }
+      renderPicked();
     });
-    setsZone.querySelectorAll('[data-remove]').forEach(btn => {
-      btn.addEventListener('click', () => { sets.splice(Number(btn.dataset.remove),1); renderSets(); });
-    });
-    setsZone.querySelector('#ifAddSet').addEventListener('click', () => {
-      const last = sets[sets.length-1];
-      sets.push(last ? Object.assign({}, last) : defaultSetForType(type));
-      renderSets();
-    });
-    setsZone.querySelector('#ifNotes').addEventListener('input', e => { item.notes = e.target.value; });
   }
 
   if (item.exerciseId) renderPicked(); else renderSearch();
@@ -1162,6 +1258,192 @@ function openTemplatePicker(onPick){
       el.addEventListener('click', () => { onPick(tpls.find(t=>t.id===el.dataset.id)); backdrop.remove(); });
     });
   }
+}
+
+// ---- Client Sessions tab (freeform logging) ---------------------------
+function sessionsFor(clientId){
+  return (_env.data.sessions||[]).filter(s => !s._deleted && s.clientId === clientId)
+    .sort((a,b) => new Date(b.date) - new Date(a.date));
+}
+
+function renderClientSessionsTab(body, client){
+  const sessions = sessionsFor(client.id);
+  body.innerHTML = `
+    <div class="rowActions" style="margin-bottom:14px;"><button class="btnAmber" id="csLogNew">+ Log session</button></div>
+    <div id="csList"></div>
+  `;
+  const listEl = body.querySelector('#csList');
+  if (!sessions.length){
+    listEl.innerHTML = '<div class="emptyState"><div class="glyph">📝</div>No sessions logged yet.</div>';
+  } else {
+    listEl.innerHTML = sessions.map(s => `
+      <div class="clientCard" data-id="${escHtml(s.id)}" style="margin-bottom:8px;">
+        <div><div class="cName">${escHtml(s.date)}</div><div class="cMeta">${s.items.length} exercise${s.items.length===1?'':'s'}${s.notes ? ' · '+escHtml(s.notes) : ''}</div></div>
+      </div>
+    `).join('');
+    listEl.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openSessionSheet(client, sessions.find(s=>s.id===el.dataset.id), body)));
+  }
+  body.querySelector('#csLogNew').addEventListener('click', () => openSessionSheet(client, null, body));
+}
+
+function openSessionSheet(client, existingSession, parentBody){
+  const isNew = !existingSession;
+  const session = existingSession ? JSON.parse(JSON.stringify(existingSession)) : {
+    id: uuid(), clientId: client.id, date: new Date().toISOString().slice(0,10), notes:'', items:[],
+    createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
+  };
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>${isNew ? 'Log session' : 'Edit session'}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="field"><label>Date</label><input id="ssDate" type="date" value="${escHtml(session.date)}"></div>
+      <div id="ssItemList"></div>
+      <div class="rowActions"><button class="btnGhost" id="ssAddItem">+ Log exercise</button></div>
+      <div class="field"><label>Session notes (optional)</label><textarea id="ssNotes" class="notesArea">${escHtml(session.notes)}</textarea></div>
+      <div class="rowActions">
+        ${!isNew ? '<button class="btnGhost btnDanger" id="ssDelete">Delete</button>' : ''}
+        <button class="btnAmber" id="ssSave">${isNew ? 'Save session' : 'Save'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+
+  const itemListEl = backdrop.querySelector('#ssItemList');
+  const refreshItems = () => renderItemList(itemListEl, session.items,
+    (idx) => openSessionItemSheet(session.items[idx], client, (updated) => { session.items[idx]=updated; refreshItems(); }),
+    (idx) => { session.items.splice(idx,1); refreshItems(); },
+    'actualSets'
+  );
+  refreshItems();
+  backdrop.querySelector('#ssAddItem').addEventListener('click', () => {
+    openSessionItemSheet(null, client, (item) => { session.items.push(item); refreshItems(); });
+  });
+
+  backdrop.querySelector('#ssSave').addEventListener('click', () => {
+    const date = backdrop.querySelector('#ssDate').value;
+    if (!date){ toast('Pick a date'); return; }
+    session.date = date;
+    session.notes = backdrop.querySelector('#ssNotes').value;
+    session.updatedAt = new Date().toISOString();
+    if (isNew){
+      _env.data.sessions = _env.data.sessions || [];
+      _env.data.sessions.push(session);
+    }
+    persistAndSync('pt_sessions', 'sessions', session);
+    backdrop.remove();
+    renderClientSessionsTab(parentBody, client);
+    toast(isNew ? 'Session logged' : 'Saved');
+  });
+  const delBtn = backdrop.querySelector('#ssDelete');
+  if (delBtn) delBtn.addEventListener('click', () => {
+    if (!confirm('Delete this session? This can\'t be undone.')) return;
+    session._deleted = true; session.updatedAt = new Date().toISOString();
+    persistAndSync('pt_sessions', 'sessions', session);
+    backdrop.remove();
+    renderClientSessionsTab(parentBody, client);
+    toast('Session deleted');
+  });
+}
+
+// ---- Client Insights tab (progression + adherence) ---------------------
+// Best single number per session for a given exercise, used to plot a
+// simple progression trend: reps -> heaviest weight logged (falls back to
+// most reps if no weight used); time -> longest duration; distance ->
+// furthest distance covered.
+function bestSetValue(item){
+  const sets = item.actualSets || [];
+  if (!sets.length) return null;
+  if (item.trackType === 'time') return Math.max(...sets.map(s=>s.seconds||0));
+  if (item.trackType === 'distance') return Math.max(...sets.map(s=>s.metres||0));
+  const withWeight = sets.filter(s=>s.weight);
+  if (withWeight.length) return Math.max(...withWeight.map(s=>s.weight));
+  return Math.max(...sets.map(s=>s.reps||0));
+}
+function formatBestValue(trackType, value){
+  if (trackType === 'time') return fmtMinSec(value);
+  if (trackType === 'distance') return `${value}m`;
+  return value % 1 === 0 ? `${value}kg` : `${value}`;
+}
+
+function computeExerciseProgress(clientId){
+  const sessions = sessionsFor(clientId).slice().sort((a,b)=>new Date(a.date)-new Date(b.date)); // chronological
+  const byExercise = {};
+  sessions.forEach(s => {
+    s.items.forEach(it => {
+      const val = bestSetValue(it);
+      if (val===null || isNaN(val)) return;
+      const key = it.exerciseId;
+      byExercise[key] = byExercise[key] || { exerciseName: it.exerciseName, trackType: it.trackType, points: [] };
+      byExercise[key].points.push({ date: s.date, value: val });
+    });
+  });
+  return Object.values(byExercise).filter(e => e.points.length >= 2);
+}
+
+function sparklineSvg(points){
+  const w = 220, h = 44, pad = 4;
+  const values = points.map(p=>p.value);
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = (max - min) || 1;
+  const stepX = (w - pad*2) / (points.length - 1 || 1);
+  const coords = points.map((p,i) => {
+    const x = pad + i*stepX;
+    const y = h - pad - ((p.value - min) / range) * (h - pad*2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const dotsColor = 'var(--amber)';
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:${h}px;overflow:visible;">
+    <polyline points="${coords.join(' ')}" fill="none" stroke="${dotsColor}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    ${coords.map(c => `<circle cx="${c.split(',')[0]}" cy="${c.split(',')[1]}" r="2.5" fill="${dotsColor}"/>`).join('')}
+  </svg>`;
+}
+
+function renderClientInsightsTab(body, client){
+  const sessions = sessionsFor(client.id);
+  const now = Date.now();
+  const last30 = sessions.filter(s => (now - new Date(s.date).getTime()) <= 30*24*60*60*1000);
+  const lastSession = sessions[0]; // already sorted desc
+  const daysSince = lastSession ? Math.floor((now - new Date(lastSession.date).getTime())/(24*60*60*1000)) : null;
+
+  const progress = computeExerciseProgress(client.id);
+
+  body.innerHTML = `
+    <div class="statRow">
+      <div class="stat"><div class="num highlight">${sessions.length}</div><div class="lbl">Total sessions</div></div>
+      <div class="stat"><div class="num">${last30.length}</div><div class="lbl">Last 30 days</div></div>
+      <div class="stat"><div class="num">${daysSince===null?'—':daysSince}</div><div class="lbl">${daysSince===null?'No sessions yet':'Days since last'}</div></div>
+    </div>
+    <div id="ciProgress"></div>
+  `;
+  const progEl = body.querySelector('#ciProgress');
+  if (!sessions.length){
+    progEl.innerHTML = '<div class="phasePlaceholder">Log a couple of sessions to start seeing progression here.</div>';
+    return;
+  }
+  if (!progress.length){
+    progEl.innerHTML = '<div class="phasePlaceholder">No exercise appears in 2+ sessions yet — progression needs at least two data points per exercise.</div>';
+    return;
+  }
+  progEl.innerHTML = '<h3 style="font-size:15px;margin:6px 0 10px;">Progression</h3>' + progress.map(e => {
+    const latest = e.points[e.points.length-1];
+    const prev = e.points[e.points.length-2];
+    const delta = latest.value - prev.value;
+    const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '–';
+    const arrowColor = delta > 0 ? 'var(--good)' : delta < 0 ? 'var(--bad)' : 'var(--chalk-dim)';
+    return `
+      <div style="background:var(--ink-soft);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;">
+          <div class="cName">${escHtml(e.exerciseName)}</div>
+          <div style="font-family:var(--mono);font-size:14px;color:${arrowColor};">${arrow} ${escHtml(formatBestValue(e.trackType, latest.value))}</div>
+        </div>
+        <div style="margin-top:8px;">${sparklineSvg(e.points)}</div>
+      </div>
+    `;
+  }).join('');
 }
 
 // ---- Templates CRUD -------------------------------------------------
