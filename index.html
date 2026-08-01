@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.8</title>
-<!-- PT Companion — version 2.8 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.9</title>
+<!-- PT Companion — version 2.9 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -301,13 +301,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.8</div>
+  <div class="loginVersion" id="loginVersion">v2.9</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.8</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.9</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -337,7 +337,13 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.8';
+const VERSION = '2.9';
+// v2.9: Calendar had no indication of which week/month it was showing
+// beyond the individual day numbers, so paging back or forward a few
+// weeks left you guessing. Added a date-range label ("28 Jul – 3 Aug
+// 2026") above the week navigation, built explicitly in day-before-month
+// order rather than relying on locale defaults (which produced awkward
+// "3 – Aug 9" phrasing in testing).
 // v2.8: Data & Backup modal, opened from the sync pill (replaces the old
 // immediate-sync-on-tap behaviour — sync now happens via a "Sync now"
 // button inside the modal). Full JSON export/import for manual backups:
@@ -1688,11 +1694,22 @@ function appointmentsOnDate(iso){
   return activeAppointments().filter(a => a.date === iso).sort((a,b) => (a.time||'').localeCompare(b.time||''));
 }
 
+function formatWeekRange(weekStart){
+  const start = new Date(weekStart + 'T00:00:00');
+  const end = new Date(addDaysIso(weekStart, 6) + 'T00:00:00');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const sameMonth = start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth();
+  const startFmt = sameMonth ? `${start.getDate()}` : `${start.getDate()} ${months[start.getMonth()]}`;
+  const endFmt = `${end.getDate()} ${months[end.getMonth()]} ${end.getFullYear()}`;
+  return `${startFmt} – ${endFmt}`;
+}
+
 function renderCalendarTab(){
   const list = document.getElementById('mainList');
   const days = [0,1,2,3,4,5,6].map(i => addDaysIso(_calWeekStart, i));
   const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   list.innerHTML = `
+    <div style="text-align:center;font-size:13px;font-weight:600;color:var(--chalk-dim);margin-bottom:8px;">${escHtml(formatWeekRange(_calWeekStart))}</div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
       <button class="iconBtn" id="calPrevWeek">◀</button>
       <button class="btnGhost" id="calToday" style="padding:6px 14px;">This week</button>
