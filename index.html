@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v1.6</title>
-<!-- PT Companion — version 1.6 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.0</title>
+<!-- PT Companion — version 2.0 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -119,7 +119,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   color:var(--chalk-dim);font-size:12px;border-radius:20px;padding:6px 12px;
 }
 
-#mainArea{flex:1;padding:16px;padding-bottom:96px;max-width:640px;width:100%;margin:0 auto;}
+#mainArea{flex:1;padding:16px;padding-bottom:calc(150px + env(safe-area-inset-bottom));max-width:640px;width:100%;margin:0 auto;}
 
 .searchRow{display:flex;gap:8px;margin-bottom:14px;}
 .searchRow input{
@@ -145,11 +145,24 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .emptyState .glyph{font-size:40px;margin-bottom:10px;}
 
 .fab{
-  position:fixed;right:20px;bottom:calc(20px + env(safe-area-inset-bottom));
+  position:fixed;right:20px;bottom:calc(78px + env(safe-area-inset-bottom));
   width:56px;height:56px;border-radius:50%;background:var(--amber);color:var(--ink);
   border:none;font-size:28px;font-weight:700;box-shadow:var(--shadow);
   display:flex;align-items:center;justify-content:center;line-height:0;
+  z-index:20;
 }
+
+#bottomNav{
+  position:fixed;left:0;right:0;bottom:0;display:flex;
+  background:var(--ink-soft);border-top:1px solid var(--line);
+  padding-bottom:env(safe-area-inset-bottom);z-index:15;
+}
+.navTab{
+  flex:1;background:none;border:none;color:var(--chalk-dim);font-size:11px;font-weight:600;
+  padding:9px 4px 8px;display:flex;flex-direction:column;align-items:center;gap:3px;
+}
+.navTab .navIcon{font-size:19px;line-height:1;}
+.navTab.active{color:var(--amber);}
 
 /* ---------- Sheet / modal ---------- */
 .sheetBackdrop{
@@ -219,7 +232,7 @@ textarea.notesArea{
 
 /* print styles reserved for programme PDF export in Phase 3 */
 @media print{
-  #topBar,.fab,.sheetBackdrop .iconBtn{display:none !important;}
+  #topBar,.fab,#bottomNav,.sheetBackdrop .iconBtn{display:none !important;}
 }
 </style>
 </head>
@@ -251,24 +264,30 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v1.6</div>
+  <div class="loginVersion" id="loginVersion">v2.0</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v1.6</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.0</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
   <div id="mainArea">
     <div class="searchRow">
-      <input id="clientSearch" type="text" placeholder="Search clients…">
+      <input id="mainSearch" type="text" placeholder="Search…">
     </div>
-    <div id="clientList"></div>
+    <div id="mainList"></div>
   </div>
 
-  <button class="fab" id="addClientFab" title="Add client">+</button>
+  <button class="fab" id="mainFab" title="Add">+</button>
+
+  <div id="bottomNav">
+    <button class="navTab active" data-tab="clients"><span class="navIcon">👤</span>Clients</button>
+    <button class="navTab" data-tab="templates"><span class="navIcon">📋</span>Templates</button>
+    <button class="navTab" data-tab="exercises"><span class="navIcon">🏋️</span>Exercises</button>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -280,15 +299,14 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '1.6';
-// v1.6: PT-003 — DEFINITIVE root-cause fix. Every prior login attempt (v1.1
-// through v1.5) depended on loading @supabase/supabase-js from a third-party
-// CDN (jsdelivr, then jsdelivr+unpkg fallback). Both consistently failed to
-// load in Pete's environment — the actual root cause all along. Ported the
-// exact pattern already proven working in the PAD launcher: raw fetch()
-// calls straight to Supabase's own REST API (/auth/v1/token, /rest/v1/*),
-// with zero third-party library dependency. Session persistence and refresh
-// also now match the launcher's localStorage + refresh-token pattern.
+const VERSION = '2.0';
+// v2.0: Phase 2 — Programme builder. Reusable exercise library (pt_exercises,
+// new table — run the v2.0 SQL add-on), reusable programme templates, and
+// per-client programme assignment with full version history (multiple
+// programmes per client over time; only one active at a time, rest archived
+// and viewable). Assigning a template deep-copies its items so editing a
+// client's programme never touches the template it came from. Bottom nav
+// (Clients / Templates / Exercises) replaces the single client-only screen.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -351,11 +369,11 @@ async function sbFetch(path, options={}){
 }
 
 // ---- Local envelope -------------------------------------------------------
-// {version, lastUpdated, lastExported, data:{clients:[...]}}
-// Backwards-compatible: unknown/missing fields default sanely, exports carry
-// a version number so future formats can detect and migrate old backups.
+// {version, lastUpdated, lastExported, data:{clients:[...], exercises:[...], programs:[...]}}
+// Backwards-compatible: a v1.6 backup with only `clients` still loads fine —
+// exercises/programs default to empty arrays rather than failing.
 function defaultEnv(){
-  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [] } };
+  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [] } };
 }
 let _env = load();
 let _envGeneration = 0; // guards against a stale in-flight pull overwriting a fresher import/replace
@@ -367,7 +385,9 @@ function load(){
     const parsed = JSON.parse(raw);
     if (typeof parsed.version !== 'number') throw new Error('Missing version field');
     parsed.data = parsed.data || {};
-    parsed.data.clients = Array.isArray(parsed.data.clients) ? parsed.data.clients : [];
+    parsed.data.clients   = Array.isArray(parsed.data.clients)   ? parsed.data.clients   : [];
+    parsed.data.exercises = Array.isArray(parsed.data.exercises) ? parsed.data.exercises : [];
+    parsed.data.programs  = Array.isArray(parsed.data.programs)  ? parsed.data.programs  : [];
     return parsed;
   }catch(e){
     console.error('Local envelope load failed, starting fresh:', e);
@@ -454,8 +474,8 @@ function onAuthed(session){
   _session = session;
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('appShell').classList.remove('hidden');
-  renderClientList();
-  pullAll().then(()=>{ flushRetryQueue(); renderClientList(); });
+  renderMainArea();
+  pullAll().then(()=>{ flushRetryQueue(); renderMainArea(); });
 }
 function onSignedOut(){
   if (_session && _session.access_token) sbSignOut(_session.access_token);
@@ -544,6 +564,8 @@ async function pullTable(table, localArrKey){
 async function pullAll(){
   _syncState = 'syncing'; renderSyncStatus();
   await pullTable('pt_clients', 'clients');
+  await pullTable('pt_exercises', 'exercises');
+  await pullTable('pt_programs', 'programs');
   _syncState = 'ok'; renderSyncStatus();
 }
 
@@ -557,7 +579,7 @@ document.getElementById('syncBtn').addEventListener('click', async () => {
   _syncState = 'syncing'; renderSyncStatus();
   await pullAll();
   await flushRetryQueue();
-  renderClientList();
+  renderMainArea();
   toast('Synced ✓');
 });
 
@@ -572,13 +594,41 @@ function renderSyncStatus(){
   else label.textContent = 'Offline';
 }
 
+// ---- Tab navigation --------------------------------------------------
+let _currentTab = 'clients'; // clients | templates | exercises
+
+function renderMainArea(){
+  const search = document.getElementById('mainSearch');
+  if (_currentTab === 'clients'){ search.placeholder = 'Search clients…'; renderClientList(); }
+  else if (_currentTab === 'templates'){ search.placeholder = 'Search templates…'; renderTemplateList(); }
+  else { search.placeholder = 'Search exercises…'; renderExerciseList(); }
+}
+document.querySelectorAll('.navTab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    _currentTab = btn.dataset.tab;
+    document.querySelectorAll('.navTab').forEach(b => b.classList.toggle('active', b===btn));
+    document.getElementById('mainSearch').value = '';
+    renderMainArea();
+  });
+});
+document.getElementById('mainSearch').addEventListener('input', renderMainArea);
+document.getElementById('mainFab').addEventListener('click', () => {
+  if (_currentTab === 'clients') openClientSheet(null);
+  else if (_currentTab === 'templates') openTemplateSheet(null);
+  else openExerciseSheet(null);
+});
+
+function escHtml(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
 // ---- Clients CRUD --------------------------------------------------------
 function activeClients(){
   return (_env.data.clients || []).filter(c => !c._deleted);
 }
 function renderClientList(){
-  const q = (document.getElementById('clientSearch').value || '').toLowerCase();
-  const list = document.getElementById('clientList');
+  const q = (document.getElementById('mainSearch').value || '').toLowerCase();
+  const list = document.getElementById('mainList');
   const clients = activeClients()
     .filter(c => !q || (c.name||'').toLowerCase().includes(q))
     .sort((a,b) => (a.name||'').localeCompare(b.name||''));
@@ -599,11 +649,6 @@ function renderClientList(){
     el.addEventListener('click', () => openClientSheet(el.dataset.id));
   });
 }
-document.getElementById('clientSearch').addEventListener('input', renderClientList);
-
-function escHtml(s){
-  return String(s==null?'':s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-}
 
 function newClientSkeleton(){
   return { id: uuid(), name:'', goals:'', notes:'', status:'active', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
@@ -618,15 +663,35 @@ function openClientSheet(id){
     <div class="sheet">
       <div class="sheetHandle"></div>
       <div class="sheetHeader">
-        <h2>${isNew ? 'Add client' : 'Edit client'}</h2>
+        <h2>${isNew ? 'Add client' : escHtml(client.name || 'Edit client')}</h2>
         <button class="iconBtn" data-close>✕</button>
       </div>
-      <div class="tabRow">
-        <button class="tabBtn active">Overview</button>
-        <button class="tabBtn" disabled title="Coming in a future release">Programme</button>
+      <div class="tabRow" id="clientTabRow">
+        <button class="tabBtn active" data-ctab="overview">Overview</button>
+        <button class="tabBtn" data-ctab="programme" ${isNew?'disabled title="Save the client first"':''}>Programme</button>
         <button class="tabBtn" disabled title="Coming in a future release">Sessions</button>
         <button class="tabBtn" disabled title="Coming in a future release">Insights</button>
       </div>
+      <div id="clientSheetBody"></div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelectorAll('#clientTabRow .tabBtn').forEach(btn => {
+    if (btn.disabled) return;
+    btn.addEventListener('click', () => {
+      backdrop.querySelectorAll('#clientTabRow .tabBtn').forEach(b => b.classList.toggle('active', b===btn));
+      renderClientSheetBody(backdrop, client, isNew, btn.dataset.ctab);
+    });
+  });
+  renderClientSheetBody(backdrop, client, isNew, 'overview');
+}
+
+function renderClientSheetBody(backdrop, client, isNew, tab){
+  const body = backdrop.querySelector('#clientSheetBody');
+  if (tab === 'overview'){
+    body.innerHTML = `
       <div class="field"><label>Name</label><input id="cfName" type="text" value="${escHtml(client.name)}"></div>
       <div class="field"><label>Goals</label><input id="cfGoals" type="text" value="${escHtml(client.goals)}" placeholder="e.g. Fat loss, 5k under 25min"></div>
       <div class="field"><label>Notes</label><textarea id="cfNotes" class="notesArea">${escHtml(client.notes)}</textarea></div>
@@ -635,50 +700,412 @@ function openClientSheet(id){
           <option value="active" ${client.status==='active'?'selected':''}>Active</option>
           <option value="archived" ${client.status==='archived'?'selected':''}>Archived</option>
         </select></div>` : ''}
-      ${!isNew ? `<div class="phasePlaceholder">Programme builder, PDF export, session logging and insights arrive in the next releases. This client's record is already synced and ready for them.</div>` : ''}
+      ${!isNew ? `<div class="phasePlaceholder">Session logging and progress insights arrive in upcoming releases.</div>` : ''}
       <div class="rowActions">
         ${!isNew ? '<button class="btnGhost btnDanger" id="cfDelete">Delete</button>' : ''}
         <button class="btnAmber" id="cfSave">${isNew ? 'Add client' : 'Save'}</button>
+      </div>
+    `;
+    body.querySelector('#cfSave').addEventListener('click', () => {
+      const name = body.querySelector('#cfName').value.trim();
+      if (!name){ toast('Name is required'); return; }
+      client.name = name;
+      client.goals = body.querySelector('#cfGoals').value.trim();
+      client.notes = body.querySelector('#cfNotes').value;
+      const statusEl = body.querySelector('#cfStatus');
+      if (statusEl) client.status = statusEl.value;
+      client.updatedAt = new Date().toISOString();
+      if (isNew){
+        _env.data.clients = _env.data.clients || [];
+        _env.data.clients.push(client);
+      }
+      persistAndSync('pt_clients', 'clients', client);
+      renderClientList();
+      backdrop.remove();
+      toast(isNew ? 'Client added' : 'Saved');
+    });
+    const delBtn = body.querySelector('#cfDelete');
+    if (delBtn){
+      delBtn.addEventListener('click', () => {
+        if (!confirm(`Delete ${client.name || 'this client'}? This can't be undone.`)) return;
+        client._deleted = true;
+        client.updatedAt = new Date().toISOString();
+        persistAndSync('pt_clients', 'clients', client);
+        renderClientList();
+        backdrop.remove();
+        toast('Client deleted');
+      });
+    }
+  } else if (tab === 'programme'){
+    renderClientProgrammeTab(body, client);
+  }
+}
+
+// ---- Programme helpers (shared by client programmes & templates) --------
+function activeExercises(){
+  return (_env.data.exercises || []).filter(e => !e._deleted && e.status !== 'archived');
+}
+function allPrograms(){ return _env.data.programs || []; }
+function templates(){ return allPrograms().filter(p => !p._deleted && p.kind === 'template'); }
+function clientProgrammes(clientId){ return allPrograms().filter(p => !p._deleted && p.kind==='client' && p.clientId===clientId); }
+function activeProgrammeFor(clientId){ return clientProgrammes(clientId).find(p => p.status === 'active'); }
+
+function itemSummary(item){
+  const parts = [];
+  if (item.sets) parts.push(item.sets + ' sets');
+  if (item.reps) parts.push(item.reps + ' reps');
+  if (item.weight) parts.push(item.weight);
+  return parts.length ? parts.join(' · ') : (item.notes || 'No target set');
+}
+
+function renderItemList(container, items, onEdit, onRemove){
+  if (!items.length){
+    container.innerHTML = '<div class="emptyState" style="padding:24px 10px;">No exercises added yet.</div>';
+    return;
+  }
+  container.innerHTML = items.map((it,idx) => `
+    <div class="clientCard" data-idx="${idx}" style="margin-bottom:8px;">
+      <div>
+        <div class="cName">${escHtml(it.exerciseName)}</div>
+        <div class="cMeta">${escHtml(itemSummary(it))}</div>
+      </div>
+      <button class="iconBtn" data-remove="${idx}" title="Remove">✕</button>
+    </div>
+  `).join('');
+  container.querySelectorAll('.clientCard').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('[data-remove]')) return;
+      onEdit(Number(el.dataset.idx));
+    });
+  });
+  container.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', e => { e.stopPropagation(); onRemove(Number(btn.dataset.remove)); });
+  });
+}
+
+// Opens a stacked sheet to add/edit one exercise-assignment within a
+// programme or template. `onSave` receives the finished item.
+function openItemSheet(existingItem, onSave){
+  const exercises = activeExercises();
+  const item = existingItem ? Object.assign({}, existingItem) : { itemId: uuid(), exerciseId:'', exerciseName:'', sets:'', reps:'', weight:'', notes:'' };
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>${existingItem ? 'Edit exercise' : 'Add exercise'}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="field"><label>Exercise</label>
+        <select id="ifExercise" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          <option value="">Choose an exercise…</option>
+          ${exercises.map(ex => `<option value="${escHtml(ex.id)}" ${ex.id===item.exerciseId?'selected':''}>${escHtml(ex.name)}</option>`).join('')}
+        </select>
+      </div>
+      ${!exercises.length ? '<div class="loginVersion" style="opacity:0.8;">No exercises yet — add one in the Exercises tab first.</div>' : ''}
+      <div class="field"><label>Sets</label><input id="ifSets" type="text" inputmode="numeric" value="${escHtml(item.sets)}" placeholder="e.g. 3"></div>
+      <div class="field"><label>Reps</label><input id="ifReps" type="text" value="${escHtml(item.reps)}" placeholder="e.g. 8-12"></div>
+      <div class="field"><label>Weight / load</label><input id="ifWeight" type="text" value="${escHtml(item.weight)}" placeholder="e.g. 20kg or bodyweight"></div>
+      <div class="field"><label>Notes / tempo</label><input id="ifNotes" type="text" value="${escHtml(item.notes)}" placeholder="e.g. 3 sec eccentric"></div>
+      <div class="rowActions"><button class="btnAmber" id="ifSave">${existingItem ? 'Save' : 'Add to programme'}</button></div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#ifSave').addEventListener('click', () => {
+    const exId = backdrop.querySelector('#ifExercise').value;
+    if (!exId){ toast('Choose an exercise'); return; }
+    const ex = exercises.find(e => e.id === exId);
+    item.exerciseId = exId;
+    item.exerciseName = ex ? ex.name : item.exerciseName;
+    item.sets = backdrop.querySelector('#ifSets').value.trim();
+    item.reps = backdrop.querySelector('#ifReps').value.trim();
+    item.weight = backdrop.querySelector('#ifWeight').value.trim();
+    item.notes = backdrop.querySelector('#ifNotes').value.trim();
+    onSave(item);
+    backdrop.remove();
+  });
+}
+
+// ---- Client Programme tab --------------------------------------------
+function renderClientProgrammeTab(body, client){
+  const active = activeProgrammeFor(client.id);
+  const history = clientProgrammes(client.id).filter(p => p.status === 'archived')
+    .sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+
+  if (!active){
+    body.innerHTML = `
+      <div class="phasePlaceholder">This client has no active programme yet.</div>
+      <div class="rowActions">
+        <button class="btnGhost" id="pfBlank">Blank programme</button>
+        <button class="btnAmber" id="pfAssign">Assign template</button>
+      </div>
+      ${history.length ? `<h3 style="font-size:15px;margin:20px 0 10px;">History</h3><div id="pfHistory"></div>` : ''}
+    `;
+  } else {
+    body.innerHTML = `
+      <div class="statRow">
+        <div class="stat"><div class="num">${active.items.length}</div><div class="lbl">Exercises</div></div>
+      </div>
+      <div class="field"><label>Programme name</label><input id="pfName" type="text" value="${escHtml(active.name)}"></div>
+      <div id="pfItemList"></div>
+      <div class="rowActions"><button class="btnGhost" id="pfAddItem">+ Add exercise</button></div>
+      <div class="rowActions">
+        <button class="btnGhost btnDanger" id="pfArchive">Archive programme</button>
+        <button class="btnAmber" id="pfSaveName">Save name</button>
+      </div>
+      ${history.length ? `<h3 style="font-size:15px;margin:20px 0 10px;">History</h3><div id="pfHistory"></div>` : ''}
+    `;
+    const itemListEl = body.querySelector('#pfItemList');
+    const refreshItems = () => renderItemList(itemListEl, active.items,
+      (idx) => openItemSheet(active.items[idx], (updated) => { active.items[idx]=updated; active.updatedAt=new Date().toISOString(); persistAndSync('pt_programs','programs',active); refreshItems(); renderProgHeader(); }),
+      (idx) => { active.items.splice(idx,1); active.updatedAt=new Date().toISOString(); persistAndSync('pt_programs','programs',active); refreshItems(); renderProgHeader(); }
+    );
+    function renderProgHeader(){ body.querySelector('.stat .num').textContent = active.items.length; }
+    refreshItems();
+    body.querySelector('#pfAddItem').addEventListener('click', () => {
+      openItemSheet(null, (item) => { active.items.push(item); active.updatedAt=new Date().toISOString(); persistAndSync('pt_programs','programs',active); refreshItems(); renderProgHeader(); });
+    });
+    body.querySelector('#pfSaveName').addEventListener('click', () => {
+      const name = body.querySelector('#pfName').value.trim();
+      if (!name){ toast('Name is required'); return; }
+      active.name = name; active.updatedAt = new Date().toISOString();
+      persistAndSync('pt_programs','programs',active);
+      toast('Saved');
+    });
+    body.querySelector('#pfArchive').addEventListener('click', () => {
+      if (!confirm(`Archive "${active.name}"? You can still view it in history.`)) return;
+      active.status = 'archived'; active.updatedAt = new Date().toISOString();
+      persistAndSync('pt_programs','programs',active);
+      renderClientProgrammeTab(body, client);
+      toast('Programme archived');
+    });
+  }
+
+  const blankBtn = body.querySelector('#pfBlank');
+  if (blankBtn) blankBtn.addEventListener('click', () => {
+    const name = prompt('Programme name:', 'New programme');
+    if (!name) return;
+    const prog = { id: uuid(), kind:'client', clientId: client.id, name: name.trim(), notes:'', status:'active', items:[], createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+    _env.data.programs = _env.data.programs || [];
+    _env.data.programs.push(prog);
+    persistAndSync('pt_programs','programs',prog);
+    renderClientProgrammeTab(body, client);
+  });
+  const assignBtn = body.querySelector('#pfAssign');
+  if (assignBtn) assignBtn.addEventListener('click', () => openTemplatePicker((tpl) => {
+    assignTemplateToClient(client, tpl);
+    renderClientProgrammeTab(body, client);
+    toast('Template assigned');
+  }));
+
+  const histEl = body.querySelector('#pfHistory');
+  if (histEl){
+    histEl.innerHTML = history.map(p => `
+      <details style="margin-bottom:8px;background:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;">
+        <summary style="cursor:pointer;font-weight:600;font-size:14px;">${escHtml(p.name)} <span style="color:var(--chalk-dim);font-weight:400;font-size:12px;">(${p.items.length} exercises)</span></summary>
+        <div style="margin-top:8px;">${p.items.map(it => `<div class="cMeta" style="margin-bottom:4px;">${escHtml(it.exerciseName)} — ${escHtml(itemSummary(it))}</div>`).join('') || '<div class="cMeta">No exercises</div>'}</div>
+      </details>
+    `).join('');
+  }
+}
+
+function assignTemplateToClient(client, template){
+  const existing = activeProgrammeFor(client.id);
+  if (existing){
+    existing.status = 'archived';
+    existing.updatedAt = new Date().toISOString();
+    persistAndSync('pt_programs','programs',existing);
+  }
+  const prog = {
+    id: uuid(), kind:'client', clientId: client.id, name: template.name, notes: template.notes || '',
+    status:'active', items: template.items.map(it => Object.assign({}, it, { itemId: uuid() })),
+    createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
+  };
+  _env.data.programs = _env.data.programs || [];
+  _env.data.programs.push(prog);
+  persistAndSync('pt_programs','programs',prog);
+}
+
+function openTemplatePicker(onPick){
+  const tpls = templates();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>Choose a template</h2><button class="iconBtn" data-close>✕</button></div>
+      ${!tpls.length ? '<div class="phasePlaceholder">No templates yet — create one in the Templates tab first.</div>' : '<div id="tplPickList"></div>'}
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  const listEl = backdrop.querySelector('#tplPickList');
+  if (listEl){
+    listEl.innerHTML = tpls.map(t => `
+      <div class="clientCard" data-id="${escHtml(t.id)}">
+        <div><div class="cName">${escHtml(t.name)}</div><div class="cMeta">${t.items.length} exercises</div></div>
+      </div>
+    `).join('');
+    listEl.querySelectorAll('.clientCard').forEach(el => {
+      el.addEventListener('click', () => { onPick(tpls.find(t=>t.id===el.dataset.id)); backdrop.remove(); });
+    });
+  }
+}
+
+// ---- Templates CRUD -------------------------------------------------
+function renderTemplateList(){
+  const q = (document.getElementById('mainSearch').value || '').toLowerCase();
+  const list = document.getElementById('mainList');
+  const tpls = templates().filter(t => !q || (t.name||'').toLowerCase().includes(q))
+    .sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  if (!tpls.length){
+    list.innerHTML = '<div class="emptyState"><div class="glyph">📋</div>Create a template to reuse across clients.</div>';
+    return;
+  }
+  list.innerHTML = tpls.map(t => `
+    <div class="clientCard" data-id="${escHtml(t.id)}">
+      <div><div class="cName">${escHtml(t.name)}</div><div class="cMeta">${t.items.length} exercises</div></div>
+    </div>
+  `).join('');
+  list.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openTemplateSheet(el.dataset.id)));
+}
+
+function openTemplateSheet(id){
+  const tpl = id ? templates().find(t=>t.id===id) : { id: uuid(), kind:'template', clientId:null, name:'', notes:'', items:[], createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+  const isNew = !id;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>${isNew ? 'New template' : 'Edit template'}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="field"><label>Template name</label><input id="tfName" type="text" value="${escHtml(tpl.name)}" placeholder="e.g. Beginner Strength A"></div>
+      <div id="tfItemList"></div>
+      <div class="rowActions"><button class="btnGhost" id="tfAddItem">+ Add exercise</button></div>
+      <div class="rowActions">
+        ${!isNew ? '<button class="btnGhost btnDanger" id="tfDelete">Delete</button>' : ''}
+        <button class="btnAmber" id="tfSave">${isNew ? 'Create template' : 'Save'}</button>
       </div>
     </div>
   `;
   document.body.appendChild(backdrop);
   backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
   backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
-
-  backdrop.querySelector('#cfSave').addEventListener('click', () => {
-    const name = document.getElementById('cfName').value.trim();
-    if (!name){ toast('Name is required'); return; }
-    client.name = name;
-    client.goals = document.getElementById('cfGoals').value.trim();
-    client.notes = document.getElementById('cfNotes').value;
-    if (!isNew) client.status = document.getElementById('cfStatus').value;
-    client.updatedAt = new Date().toISOString();
-    if (isNew){
-      _env.data.clients = _env.data.clients || [];
-      _env.data.clients.push(client);
-    }
-    persistAndSync('pt_clients', 'clients', client);
-    renderClientList();
-    backdrop.remove();
-    toast(isNew ? 'Client added' : 'Saved');
+  const itemListEl = backdrop.querySelector('#tfItemList');
+  const refreshItems = () => renderItemList(itemListEl, tpl.items,
+    (idx) => openItemSheet(tpl.items[idx], (updated) => { tpl.items[idx]=updated; refreshItems(); }),
+    (idx) => { tpl.items.splice(idx,1); refreshItems(); }
+  );
+  refreshItems();
+  backdrop.querySelector('#tfAddItem').addEventListener('click', () => {
+    openItemSheet(null, (item) => { tpl.items.push(item); refreshItems(); });
   });
-
-  const delBtn = backdrop.querySelector('#cfDelete');
-  if (delBtn){
-    delBtn.addEventListener('click', () => {
-      if (!confirm(`Delete ${client.name || 'this client'}? This can't be undone.`)) return;
-      client._deleted = true;
-      client.updatedAt = new Date().toISOString();
-      persistAndSync('pt_clients', 'clients', client);
-      renderClientList();
-      backdrop.remove();
-      toast('Client deleted');
-    });
-  }
+  backdrop.querySelector('#tfSave').addEventListener('click', () => {
+    const name = backdrop.querySelector('#tfName').value.trim();
+    if (!name){ toast('Name is required'); return; }
+    tpl.name = name;
+    tpl.updatedAt = new Date().toISOString();
+    if (isNew){
+      _env.data.programs = _env.data.programs || [];
+      _env.data.programs.push(tpl);
+    }
+    persistAndSync('pt_programs','programs',tpl);
+    renderTemplateList();
+    backdrop.remove();
+    toast(isNew ? 'Template created' : 'Saved');
+  });
+  const delBtn = backdrop.querySelector('#tfDelete');
+  if (delBtn) delBtn.addEventListener('click', () => {
+    if (!confirm(`Delete template "${tpl.name}"? This can't be undone.`)) return;
+    tpl._deleted = true; tpl.updatedAt = new Date().toISOString();
+    persistAndSync('pt_programs','programs',tpl);
+    renderTemplateList();
+    backdrop.remove();
+    toast('Template deleted');
+  });
 }
 
-document.getElementById('addClientFab').addEventListener('click', () => openClientSheet(null));
+// ---- Exercises CRUD ---------------------------------------------------
+function renderExerciseList(){
+  const q = (document.getElementById('mainSearch').value || '').toLowerCase();
+  const list = document.getElementById('mainList');
+  const exercises = (_env.data.exercises||[]).filter(e => !e._deleted && (!q || (e.name||'').toLowerCase().includes(q)))
+    .sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  if (!exercises.length){
+    list.innerHTML = '<div class="emptyState"><div class="glyph">🏋️</div>Add exercises to build programmes from.</div>';
+    return;
+  }
+  list.innerHTML = exercises.map(e => `
+    <div class="clientCard" data-id="${escHtml(e.id)}">
+      <div><div class="cName">${escHtml(e.name)}</div><div class="cMeta">${escHtml(e.type||'strength')}</div></div>
+      <span class="badge ${e.status==='archived'?'archived':'active'}">${e.status==='archived'?'Archived':'Active'}</span>
+    </div>
+  `).join('');
+  list.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openExerciseSheet(el.dataset.id)));
+}
+
+function openExerciseSheet(id){
+  const ex = id ? (_env.data.exercises||[]).find(e=>e.id===id) : { id: uuid(), name:'', type:'strength', notes:'', status:'active', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+  const isNew = !id;
+  const types = ['strength','cardio','mobility','other'];
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>${isNew ? 'Add exercise' : 'Edit exercise'}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="field"><label>Name</label><input id="efName" type="text" value="${escHtml(ex.name)}" placeholder="e.g. Barbell Back Squat"></div>
+      <div class="field"><label>Type</label>
+        <select id="efType" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          ${types.map(t => `<option value="${t}" ${ex.type===t?'selected':''}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Notes</label><textarea id="efNotes" class="notesArea">${escHtml(ex.notes)}</textarea></div>
+      ${!isNew ? `<div class="field"><label>Status</label>
+        <select id="efStatus" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          <option value="active" ${ex.status==='active'?'selected':''}>Active</option>
+          <option value="archived" ${ex.status==='archived'?'selected':''}>Archived</option>
+        </select></div>` : ''}
+      <div class="rowActions">
+        ${!isNew ? '<button class="btnGhost btnDanger" id="efDelete">Delete</button>' : ''}
+        <button class="btnAmber" id="efSave">${isNew ? 'Add exercise' : 'Save'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#efSave').addEventListener('click', () => {
+    const name = backdrop.querySelector('#efName').value.trim();
+    if (!name){ toast('Name is required'); return; }
+    ex.name = name;
+    ex.type = backdrop.querySelector('#efType').value;
+    ex.notes = backdrop.querySelector('#efNotes').value;
+    const statusEl = backdrop.querySelector('#efStatus');
+    if (statusEl) ex.status = statusEl.value;
+    ex.updatedAt = new Date().toISOString();
+    if (isNew){
+      _env.data.exercises = _env.data.exercises || [];
+      _env.data.exercises.push(ex);
+    }
+    persistAndSync('pt_exercises', 'exercises', ex);
+    renderExerciseList();
+    backdrop.remove();
+    toast(isNew ? 'Exercise added' : 'Saved');
+  });
+  const delBtn = backdrop.querySelector('#efDelete');
+  if (delBtn) delBtn.addEventListener('click', () => {
+    if (!confirm(`Delete "${ex.name}"? This can't be undone.`)) return;
+    ex._deleted = true; ex.updatedAt = new Date().toISOString();
+    persistAndSync('pt_exercises', 'exercises', ex);
+    renderExerciseList();
+    backdrop.remove();
+    toast('Exercise deleted');
+  });
+}
+
+
 
 // ---- Toast ---------------------------------------------------------------
 let _toastTimer = null;
