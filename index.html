@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.0</title>
-<!-- PT Companion — version 2.0 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.1</title>
+<!-- PT Companion — version 2.1 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -136,6 +136,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .clientCard .cName{font-size:17px;font-weight:600;}
 .clientCard .cMeta{color:var(--chalk-dim);font-size:12.5px;margin-top:3px;}
 .badge{font-size:11px;padding:3px 8px;border-radius:20px;font-weight:600;letter-spacing:.02em;}
+.tagChip{
+  display:inline-block;margin:0 6px 6px 0;padding:7px 12px;border-radius:20px;
+  border:1px solid var(--line);background:var(--ink);color:var(--chalk-dim);
+  font-size:13px;font-weight:600;
+}
+.tagChip.on{background:var(--amber);color:var(--ink);border-color:var(--amber);}
 .badge.active{background:rgba(76,140,107,0.18);color:var(--good);}
 .badge.archived{background:rgba(255,255,255,0.08);color:var(--chalk-dim);}
 
@@ -264,13 +270,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.0</div>
+  <div class="loginVersion" id="loginVersion">v2.1</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.0</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.1</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -287,6 +293,7 @@ textarea.notesArea{
     <button class="navTab active" data-tab="clients"><span class="navIcon">👤</span>Clients</button>
     <button class="navTab" data-tab="templates"><span class="navIcon">📋</span>Templates</button>
     <button class="navTab" data-tab="exercises"><span class="navIcon">🏋️</span>Exercises</button>
+    <button class="navTab" data-tab="tags"><span class="navIcon">🏷️</span>Tags</button>
   </div>
 </div>
 
@@ -299,14 +306,16 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.0';
-// v2.0: Phase 2 — Programme builder. Reusable exercise library (pt_exercises,
-// new table — run the v2.0 SQL add-on), reusable programme templates, and
-// per-client programme assignment with full version history (multiple
-// programmes per client over time; only one active at a time, rest archived
-// and viewable). Assigning a template deep-copies its items so editing a
-// client's programme never touches the template it came from. Bottom nav
-// (Clients / Templates / Exercises) replaces the single client-only screen.
+const VERSION = '2.1';
+// v2.1: Exercise/tag library, ported from Gym Tracker v2.57's starter data
+// (65 exercises, 29 body-area tags across 8 groups — Spa excluded, not
+// relevant to PT programming). New: reusable tags with body-area assignment
+// (new pt_tags table — run the v2.1 SQL add-on), exercise model now uses
+// trackType (reps/distance/time) + multi-tag chips instead of the old
+// single strength/cardio/mobility/other field. v2.0 exercises migrate
+// automatically and non-destructively on load. "Load starter library"
+// buttons on both Exercises and Tags tabs seed the data on demand
+// (dedupes by name, safe to run more than once).
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -373,7 +382,7 @@ async function sbFetch(path, options={}){
 // Backwards-compatible: a v1.6 backup with only `clients` still loads fine —
 // exercises/programs default to empty arrays rather than failing.
 function defaultEnv(){
-  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [] } };
+  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [] } };
 }
 let _env = load();
 let _envGeneration = 0; // guards against a stale in-flight pull overwriting a fresher import/replace
@@ -388,6 +397,8 @@ function load(){
     parsed.data.clients   = Array.isArray(parsed.data.clients)   ? parsed.data.clients   : [];
     parsed.data.exercises = Array.isArray(parsed.data.exercises) ? parsed.data.exercises : [];
     parsed.data.programs  = Array.isArray(parsed.data.programs)  ? parsed.data.programs  : [];
+    parsed.data.tags      = Array.isArray(parsed.data.tags)      ? parsed.data.tags      : [];
+    migrateLegacyExercises(parsed.data.exercises);
     return parsed;
   }catch(e){
     console.error('Local envelope load failed, starting fresh:', e);
@@ -566,6 +577,7 @@ async function pullAll(){
   await pullTable('pt_clients', 'clients');
   await pullTable('pt_exercises', 'exercises');
   await pullTable('pt_programs', 'programs');
+  await pullTable('pt_tags', 'tags');
   _syncState = 'ok'; renderSyncStatus();
 }
 
@@ -595,13 +607,14 @@ function renderSyncStatus(){
 }
 
 // ---- Tab navigation --------------------------------------------------
-let _currentTab = 'clients'; // clients | templates | exercises
+let _currentTab = 'clients'; // clients | templates | exercises | tags
 
 function renderMainArea(){
   const search = document.getElementById('mainSearch');
   if (_currentTab === 'clients'){ search.placeholder = 'Search clients…'; renderClientList(); }
   else if (_currentTab === 'templates'){ search.placeholder = 'Search templates…'; renderTemplateList(); }
-  else { search.placeholder = 'Search exercises…'; renderExerciseList(); }
+  else if (_currentTab === 'exercises'){ search.placeholder = 'Search exercises…'; renderExerciseList(); }
+  else { search.placeholder = 'Search tags…'; renderTagList(); }
 }
 document.querySelectorAll('.navTab').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -615,7 +628,8 @@ document.getElementById('mainSearch').addEventListener('input', renderMainArea);
 document.getElementById('mainFab').addEventListener('click', () => {
   if (_currentTab === 'clients') openClientSheet(null);
   else if (_currentTab === 'templates') openTemplateSheet(null);
-  else openExerciseSheet(null);
+  else if (_currentTab === 'exercises') openExerciseSheet(null);
+  else openTagSheet(null);
 });
 
 function escHtml(s){
@@ -1026,29 +1040,244 @@ function openTemplateSheet(id){
   });
 }
 
+// ---- Body areas, tag library & exercise library — starter data ported
+// from Gym Tracker v2.57's STARTER_LIBRARY / TAG_GROUPS (Spa entries
+// excluded — not relevant to personal-training programming).
+const BODY_AREAS = ['Chest','Back','Shoulders','Arms','Legs','Core','Cardio','Mobility','Other'];
+
+const TAG_STARTER_LIBRARY = [
+  {name:"Chest", bodyArea:"Chest"},
+  {name:"Upper Chest", bodyArea:"Chest"},
+  {name:"Lats", bodyArea:"Back"},
+  {name:"Mid Back", bodyArea:"Back"},
+  {name:"Upper Back", bodyArea:"Back"},
+  {name:"Lower Back", bodyArea:"Back"},
+  {name:"Shoulders", bodyArea:"Shoulders"},
+  {name:"Side Delts", bodyArea:"Shoulders"},
+  {name:"Front Delts", bodyArea:"Shoulders"},
+  {name:"Rear Delts", bodyArea:"Shoulders"},
+  {name:"Rotator Cuff", bodyArea:"Shoulders"},
+  {name:"Traps", bodyArea:"Shoulders"},
+  {name:"Biceps", bodyArea:"Arms"},
+  {name:"Triceps", bodyArea:"Arms"},
+  {name:"Legs", bodyArea:"Legs"},
+  {name:"Quads", bodyArea:"Legs"},
+  {name:"Hamstrings", bodyArea:"Legs"},
+  {name:"Glutes", bodyArea:"Legs"},
+  {name:"Calves", bodyArea:"Legs"},
+  {name:"Posterior Chain", bodyArea:"Legs"},
+  {name:"Hip Flexors", bodyArea:"Legs"},
+  {name:"Core", bodyArea:"Core"},
+  {name:"Abs", bodyArea:"Core"},
+  {name:"Lower Abs", bodyArea:"Core"},
+  {name:"Obliques", bodyArea:"Core"},
+  {name:"Cardiovascular", bodyArea:"Cardio"},
+  {name:"Full Body", bodyArea:"Cardio"},
+  {name:"Spine Mobility", bodyArea:"Mobility"},
+  {name:"Upper Spine", bodyArea:"Mobility"},
+];
+const EXERCISE_STARTER_LIBRARY = [
+  {name:"Barbell Bench Press", trackType:"reps", tags:["Chest", "Triceps", "Front Delts"]},
+  {name:"Incline Dumbbell Press", trackType:"reps", tags:["Upper Chest", "Shoulders", "Triceps"]},
+  {name:"Chest Press Machine", trackType:"reps", tags:["Chest", "Triceps"]},
+  {name:"Pec Deck / Chest Fly", trackType:"reps", tags:["Chest"]},
+  {name:"Cable Chest Fly", trackType:"reps", tags:["Chest"]},
+  {name:"Push-ups", trackType:"reps", tags:["Chest", "Triceps", "Core"]},
+  {name:"Lat Pulldown", trackType:"reps", tags:["Lats", "Biceps", "Upper Back"]},
+  {name:"Seated Cable Row", trackType:"reps", tags:["Mid Back", "Lats", "Biceps"]},
+  {name:"Chest Supported Row", trackType:"reps", tags:["Upper Back", "Rear Delts"]},
+  {name:"Barbell Row", trackType:"reps", tags:["Lats", "Lower Back", "Biceps"]},
+  {name:"Dumbbell Row", trackType:"reps", tags:["Lats", "Core"]},
+  {name:"Pull-ups", trackType:"reps", tags:["Lats", "Biceps"]},
+  {name:"Assisted Pull-ups", trackType:"reps", tags:["Lats", "Biceps"]},
+  {name:"Dumbbell Shoulder Press", trackType:"reps", tags:["Shoulders", "Triceps"]},
+  {name:"Barbell Overhead Press", trackType:"reps", tags:["Shoulders", "Core", "Triceps"]},
+  {name:"Shoulder Press Machine", trackType:"reps", tags:["Shoulders"]},
+  {name:"Lateral Raises", trackType:"reps", tags:["Side Delts"]},
+  {name:"Front Raises", trackType:"reps", tags:["Front Delts"]},
+  {name:"Rear Delt Fly", trackType:"reps", tags:["Rear Delts", "Upper Back"]},
+  {name:"Face Pulls", trackType:"reps", tags:["Rear Delts", "Traps", "Rotator Cuff"]},
+  {name:"Barbell Squat", trackType:"reps", tags:["Quads", "Glutes", "Core"]},
+  {name:"Leg Press", trackType:"reps", tags:["Quads", "Glutes"]},
+  {name:"Hack Squat", trackType:"reps", tags:["Quads"]},
+  {name:"Smith Machine Squat", trackType:"reps", tags:["Quads", "Glutes"]},
+  {name:"Deadlift", trackType:"reps", tags:["Posterior Chain", "Glutes", "Hamstrings"]},
+  {name:"Romanian Deadlift", trackType:"reps", tags:["Hamstrings", "Glutes"]},
+  {name:"Leg Extension", trackType:"reps", tags:["Quads"]},
+  {name:"Hamstring Curl", trackType:"reps", tags:["Hamstrings"]},
+  {name:"Calf Raise Machine", trackType:"reps", tags:["Calves"]},
+  {name:"Barbell Curl", trackType:"reps", tags:["Biceps"]},
+  {name:"Dumbbell Curl", trackType:"reps", tags:["Biceps"]},
+  {name:"Cable Curl", trackType:"reps", tags:["Biceps"]},
+  {name:"Tricep Pushdown", trackType:"reps", tags:["Triceps"]},
+  {name:"Overhead Tricep Extension", trackType:"reps", tags:["Triceps"]},
+  {name:"Dips", trackType:"reps", tags:["Triceps", "Chest"]},
+  {name:"Cable Crunch", trackType:"reps", tags:["Abs"]},
+  {name:"Weighted Sit-ups", trackType:"reps", tags:["Abs"]},
+  {name:"Hanging Leg Raise", trackType:"reps", tags:["Lower Abs", "Hip Flexors"]},
+  {name:"Treadmill", trackType:"distance", tags:["Cardiovascular"]},
+  {name:"Cross Trainer", trackType:"distance", tags:["Cardiovascular", "Full Body"]},
+  {name:"Stationary Bike", trackType:"distance", tags:["Cardiovascular", "Quads"]},
+  {name:"Rowing Machine", trackType:"distance", tags:["Full Body", "Cardiovascular"]},
+  {name:"Stair Climber", trackType:"distance", tags:["Glutes", "Quads", "Cardiovascular"]},
+  {name:"Battle Ropes", trackType:"time", tags:["Shoulders", "Cardiovascular"]},
+  {name:"Sled Push/Pull", trackType:"distance", tags:["Legs", "Cardiovascular"]},
+  {name:"Kettlebell Swings", trackType:"reps", tags:["Posterior Chain", "Core"]},
+  {name:"Box Jumps", trackType:"reps", tags:["Legs"]},
+  {name:"Plank", trackType:"time", tags:["Core"]},
+  {name:"Side Plank", trackType:"time", tags:["Obliques"]},
+  {name:"Dead Bug", trackType:"time", tags:["Core"]},
+  {name:"Bird Dog", trackType:"time", tags:["Core", "Lower Back"]},
+  {name:"Hamstring Stretch", trackType:"time", tags:["Hamstrings"]},
+  {name:"Hip Flexor Stretch", trackType:"time", tags:["Hip Flexors"]},
+  {name:"Quad Stretch", trackType:"time", tags:["Quads"]},
+  {name:"Calf Stretch", trackType:"time", tags:["Calves"]},
+  {name:"Thoracic Rotations", trackType:"time", tags:["Upper Spine"]},
+  {name:"Shoulder Band Stretch", trackType:"time", tags:["Shoulders"]},
+  {name:"Cat-Cow", trackType:"time", tags:["Spine Mobility"]},
+  {name:"Freestyle (Front Crawl)", trackType:"distance", tags:["Full Body", "Lats", "Core"]},
+  {name:"Breaststroke", trackType:"distance", tags:["Chest", "Legs"]},
+  {name:"Backstroke", trackType:"distance", tags:["Upper Back", "Shoulders"]},
+  {name:"Butterfly", trackType:"distance", tags:["Shoulders", "Core", "Chest"]},
+  {name:"Continuous Swim", trackType:"distance", tags:["Cardiovascular"]},
+  {name:"Interval Swimming", trackType:"distance", tags:["Cardiovascular"]},
+  {name:"Drill Work (kickboard, pull buoy)", trackType:"time", tags:["Full Body"]},
+];
+
+// One-time, non-destructive migration for exercises created in v2.0, which
+// had a single `type` field (strength/cardio/mobility/other) and no tags.
+// Maps the old field to the new trackType vocabulary (reps/distance/time)
+// used for session logging in a later phase, and ensures `tags` exists.
+function migrateLegacyExercises(exercises){
+  const legacyMap = { strength:'reps', cardio:'distance', mobility:'time', other:'reps' };
+  (exercises||[]).forEach(e => {
+    if (!e.trackType){
+      e.trackType = (e.type && legacyMap[e.type]) || 'reps';
+    }
+    if (!Array.isArray(e.tags)) e.tags = [];
+  });
+}
+
+// ---- Tags CRUD ---------------------------------------------------------
+function activeTags(){ return (_env.data.tags||[]).filter(t => !t._deleted); }
+
+function renderTagList(){
+  const q = (document.getElementById('mainSearch').value || '').toLowerCase();
+  const list = document.getElementById('mainList');
+  const tags = activeTags().filter(t => !q || (t.name||'').toLowerCase().includes(q))
+    .sort((a,b) => (a.bodyArea||'').localeCompare(b.bodyArea||'') || (a.name||'').localeCompare(b.name||''));
+  const seedBtn = '<div class="rowActions" style="margin-bottom:12px;"><button class="btnGhost" id="seedTagsBtn">+ Load starter tags (from Gym Tracker)</button></div>';
+  if (!tags.length){
+    list.innerHTML = seedBtn + '<div class="emptyState"><div class="glyph">🏷️</div>Add tags and assign them to a body area.</div>';
+  } else {
+    list.innerHTML = seedBtn + tags.map(t => `
+      <div class="clientCard" data-id="${escHtml(t.id)}">
+        <div><div class="cName">${escHtml(t.name)}</div></div>
+        <span class="badge active">${escHtml(t.bodyArea||'Other')}</span>
+      </div>
+    `).join('');
+  }
+  list.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openTagSheet(el.dataset.id)));
+  const seed = list.querySelector('#seedTagsBtn');
+  if (seed) seed.addEventListener('click', loadStarterTags);
+}
+
+function openTagSheet(id){
+  const tag = id ? (_env.data.tags||[]).find(t=>t.id===id) : { id: uuid(), name:'', bodyArea:'Other', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+  const isNew = !id;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>${isNew ? 'Add tag' : 'Edit tag'}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="field"><label>Tag name</label><input id="tgName" type="text" value="${escHtml(tag.name)}" placeholder="e.g. Glutes"></div>
+      <div class="field"><label>Body area</label>
+        <select id="tgArea" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          ${BODY_AREAS.map(a => `<option value="${a}" ${tag.bodyArea===a?'selected':''}>${a}</option>`).join('')}
+        </select>
+      </div>
+      <div class="rowActions">
+        ${!isNew ? '<button class="btnGhost btnDanger" id="tgDelete">Delete</button>' : ''}
+        <button class="btnAmber" id="tgSave">${isNew ? 'Add tag' : 'Save'}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#tgSave').addEventListener('click', () => {
+    const name = backdrop.querySelector('#tgName').value.trim();
+    if (!name){ toast('Name is required'); return; }
+    const dupe = activeTags().find(t => t.id!==tag.id && t.name.toLowerCase()===name.toLowerCase());
+    if (dupe){ toast('A tag with that name already exists'); return; }
+    tag.name = name;
+    tag.bodyArea = backdrop.querySelector('#tgArea').value;
+    tag.updatedAt = new Date().toISOString();
+    if (isNew){
+      _env.data.tags = _env.data.tags || [];
+      _env.data.tags.push(tag);
+    }
+    persistAndSync('pt_tags', 'tags', tag);
+    renderTagList();
+    backdrop.remove();
+    toast(isNew ? 'Tag added' : 'Saved');
+  });
+  const delBtn = backdrop.querySelector('#tgDelete');
+  if (delBtn) delBtn.addEventListener('click', () => {
+    if (!confirm(`Delete tag "${tag.name}"? This can't be undone.`)) return;
+    tag._deleted = true; tag.updatedAt = new Date().toISOString();
+    persistAndSync('pt_tags', 'tags', tag);
+    renderTagList();
+    backdrop.remove();
+    toast('Tag deleted');
+  });
+}
+
+function loadStarterTags(){
+  const existingNames = new Set(activeTags().map(t => t.name.toLowerCase()));
+  const now = new Date().toISOString();
+  let added = 0;
+  _env.data.tags = _env.data.tags || [];
+  TAG_STARTER_LIBRARY.forEach(item => {
+    if (existingNames.has(item.name.toLowerCase())) return;
+    const record = { id: uuid(), name: item.name, bodyArea: item.bodyArea, createdAt: now, updatedAt: now };
+    _env.data.tags.push(record);
+    persistAndSync('pt_tags', 'tags', record);
+    existingNames.add(item.name.toLowerCase());
+    added++;
+  });
+  renderTagList();
+  toast(added ? `Added ${added} tag${added===1?'':'s'} ✓` : 'All starter tags already in your library');
+}
+
 // ---- Exercises CRUD ---------------------------------------------------
 function renderExerciseList(){
   const q = (document.getElementById('mainSearch').value || '').toLowerCase();
   const list = document.getElementById('mainList');
-  const exercises = (_env.data.exercises||[]).filter(e => !e._deleted && (!q || (e.name||'').toLowerCase().includes(q)))
+  const exercises = (_env.data.exercises||[]).filter(e => !e._deleted && (!q || (e.name||'').toLowerCase().includes(q) || (e.tags||[]).some(t=>t.toLowerCase().includes(q))))
     .sort((a,b) => (a.name||'').localeCompare(b.name||''));
+  const seedBtn = '<div class="rowActions" style="margin-bottom:12px;"><button class="btnGhost" id="seedExBtn">+ Load starter library (from Gym Tracker)</button></div>';
   if (!exercises.length){
-    list.innerHTML = '<div class="emptyState"><div class="glyph">🏋️</div>Add exercises to build programmes from.</div>';
-    return;
+    list.innerHTML = seedBtn + '<div class="emptyState"><div class="glyph">🏋️</div>Add exercises to build programmes from.</div>';
+  } else {
+    list.innerHTML = seedBtn + exercises.map(e => `
+      <div class="clientCard" data-id="${escHtml(e.id)}">
+        <div><div class="cName">${escHtml(e.name)}</div><div class="cMeta">${escHtml(e.trackType||'reps')}${(e.tags&&e.tags.length) ? ' · '+escHtml(e.tags.join(', ')) : ''}</div></div>
+        <span class="badge ${e.status==='archived'?'archived':'active'}">${e.status==='archived'?'Archived':'Active'}</span>
+      </div>
+    `).join('');
   }
-  list.innerHTML = exercises.map(e => `
-    <div class="clientCard" data-id="${escHtml(e.id)}">
-      <div><div class="cName">${escHtml(e.name)}</div><div class="cMeta">${escHtml(e.type||'strength')}</div></div>
-      <span class="badge ${e.status==='archived'?'archived':'active'}">${e.status==='archived'?'Archived':'Active'}</span>
-    </div>
-  `).join('');
   list.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openExerciseSheet(el.dataset.id)));
+  const seed = list.querySelector('#seedExBtn');
+  if (seed) seed.addEventListener('click', loadStarterExercises);
 }
 
 function openExerciseSheet(id){
-  const ex = id ? (_env.data.exercises||[]).find(e=>e.id===id) : { id: uuid(), name:'', type:'strength', notes:'', status:'active', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+  const ex = id ? (_env.data.exercises||[]).find(e=>e.id===id) : { id: uuid(), name:'', trackType:'reps', tags:[], notes:'', status:'active', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
   const isNew = !id;
-  const types = ['strength','cardio','mobility','other'];
+  const trackTypes = ['reps','distance','time'];
+  let selectedTags = (ex.tags||[]).slice();
   const backdrop = document.createElement('div');
   backdrop.className = 'sheetBackdrop';
   backdrop.innerHTML = `
@@ -1056,11 +1285,12 @@ function openExerciseSheet(id){
       <div class="sheetHandle"></div>
       <div class="sheetHeader"><h2>${isNew ? 'Add exercise' : 'Edit exercise'}</h2><button class="iconBtn" data-close>✕</button></div>
       <div class="field"><label>Name</label><input id="efName" type="text" value="${escHtml(ex.name)}" placeholder="e.g. Barbell Back Squat"></div>
-      <div class="field"><label>Type</label>
-        <select id="efType" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
-          ${types.map(t => `<option value="${t}" ${ex.type===t?'selected':''}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`).join('')}
+      <div class="field"><label>Tracked as</label>
+        <select id="efTrackType" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          ${trackTypes.map(t => `<option value="${t}" ${ex.trackType===t?'selected':''}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`).join('')}
         </select>
       </div>
+      <div class="field"><label>Tags (body areas)</label><div id="efTagChips"></div></div>
       <div class="field"><label>Notes</label><textarea id="efNotes" class="notesArea">${escHtml(ex.notes)}</textarea></div>
       ${!isNew ? `<div class="field"><label>Status</label>
         <select id="efStatus" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
@@ -1076,11 +1306,34 @@ function openExerciseSheet(id){
   document.body.appendChild(backdrop);
   backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
   backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+
+  const chipsEl = backdrop.querySelector('#efTagChips');
+  function renderChips(){
+    const available = activeTags();
+    if (!available.length){
+      chipsEl.innerHTML = '<div class="cMeta">No tags yet — add some in the Tags tab first.</div>';
+      return;
+    }
+    chipsEl.innerHTML = available.map(t => `
+      <button type="button" class="tagChip ${selectedTags.includes(t.name)?'on':''}" data-tag="${escHtml(t.name)}">${escHtml(t.name)}</button>
+    `).join('');
+    chipsEl.querySelectorAll('.tagChip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const name = chip.dataset.tag;
+        if (selectedTags.includes(name)) selectedTags = selectedTags.filter(t=>t!==name);
+        else selectedTags.push(name);
+        renderChips();
+      });
+    });
+  }
+  renderChips();
+
   backdrop.querySelector('#efSave').addEventListener('click', () => {
     const name = backdrop.querySelector('#efName').value.trim();
     if (!name){ toast('Name is required'); return; }
     ex.name = name;
-    ex.type = backdrop.querySelector('#efType').value;
+    ex.trackType = backdrop.querySelector('#efTrackType').value;
+    ex.tags = selectedTags.slice();
     ex.notes = backdrop.querySelector('#efNotes').value;
     const statusEl = backdrop.querySelector('#efStatus');
     if (statusEl) ex.status = statusEl.value;
@@ -1105,7 +1358,23 @@ function openExerciseSheet(id){
   });
 }
 
-
+function loadStarterExercises(){
+  const existingNames = new Set((_env.data.exercises||[]).filter(e=>!e._deleted).map(e => e.name.toLowerCase()));
+  const now = new Date().toISOString();
+  let added = 0;
+  _env.data.exercises = _env.data.exercises || [];
+  EXERCISE_STARTER_LIBRARY.forEach(item => {
+    if (existingNames.has(item.name.toLowerCase())) return;
+    const record = { id: uuid(), name:item.name, trackType:item.trackType, tags:item.tags.slice(), notes:'', status:'active', createdAt:now, updatedAt:now };
+    _env.data.exercises.push(record);
+    persistAndSync('pt_exercises', 'exercises', record);
+    existingNames.add(item.name.toLowerCase());
+    added++;
+  });
+  renderExerciseList();
+  const skipped = EXERCISE_STARTER_LIBRARY.length - added;
+  toast(added ? `Added ${added} exercise${added===1?'':'s'}${skipped?' · '+skipped+' already existed':''} ✓` : 'All starter exercises already in your library');
+}
 
 // ---- Toast ---------------------------------------------------------------
 let _toastTimer = null;
