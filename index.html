@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.9</title>
-<!-- PT Companion — version 2.9 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.10</title>
+<!-- PT Companion — version 2.10 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -301,13 +301,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.9</div>
+  <div class="loginVersion" id="loginVersion">v2.10</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.9</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.10</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -337,7 +337,20 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.9';
+const VERSION = '2.10';
+// v2.10: Real root-cause fix for the calendar showing an odd date range
+// (not just a labeling issue, as v2.9 assumed). addDaysIso() and
+// todayISO() built a Date at local midnight, then read it back via
+// .toISOString() — which is always UTC. In any timezone AHEAD of UTC
+// (UK during BST = UTC+1, for example), local midnight is still the
+// previous day in UTC, so every date computed this way silently shifted
+// backwards by a day, compounding on every addDaysIso call — this is why
+// whole weeks could drift off Monday-Sunday rather than just being
+// mislabelled. Fixed by extracting date components locally throughout
+// (toISODateLocal helper) instead of round-tripping through UTC.
+// Verified against a simulated Europe/London (BST) environment: the old
+// code shifted a full week by 2+ days; the fix produces the exact
+// Monday-Sunday range expected.
 // v2.9: Calendar had no indication of which week/month it was showing
 // beyond the individual day numbers, so paging back or forward a few
 // weeks left you guessing. Added a date-range label ("28 Jul – 3 Aug
@@ -1674,11 +1687,21 @@ function openProgrammePlanSheet(programme, planIdx, parentBody, client){
 }
 
 // ---- Calendar (appointment booking) ------------------------------------
-function todayISO(){ return new Date().toISOString().slice(0,10); }
+// Date-only helpers work entirely in LOCAL date-space. The previous
+// version built a Date at local midnight then read it back via
+// toISOString() (which is always UTC) — in any timezone ahead of UTC
+// (e.g. UK during BST, UTC+1), local midnight is still the previous day
+// in UTC, so every date computed this way silently shifted back by one
+// day. That's why the calendar's week could drift off Monday–Sunday.
+function toISODateLocal(d){
+  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function todayISO(){ return toISODateLocal(new Date()); }
 function addDaysIso(iso, days){
   const d = new Date(iso + 'T00:00:00');
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0,10);
+  return toISODateLocal(d);
 }
 function mondayOf(iso){
   const d = new Date(iso + 'T00:00:00');
@@ -1882,7 +1905,7 @@ function openSessionSheet(client, existingSession, parentBody){
   const isNew = !existingSession;
   const activeProg = activeProgrammeFor(client.id);
   const session = existingSession ? JSON.parse(JSON.stringify(existingSession)) : {
-    id: uuid(), clientId: client.id, date: new Date().toISOString().slice(0,10),
+    id: uuid(), clientId: client.id, date: todayISO(),
     programmeId: activeProg ? activeProg.id : null,
     reviewNotes:'', progressionNotes:'', items:[], appointmentId:null,
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
