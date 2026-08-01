@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.10</title>
-<!-- PT Companion — version 2.10 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.11</title>
+<!-- PT Companion — version 2.11 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -301,13 +301,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.10</div>
+  <div class="loginVersion" id="loginVersion">v2.11</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.10</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.11</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -337,7 +337,30 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.10';
+const VERSION = '2.11';
+// v2.11: SECURITY FIX — full multi-trainer isolation audit ahead of sharing
+// this app with a second trainer. Found and fixed two real issues:
+// (1) Local storage (the offline cache of clients/exercises/programmes/
+// sessions/appointments) used ONE shared key regardless of who was logged
+// in. If a second trainer logged into the same browser after a first one,
+// the app loaded straight into the first trainer's cached data — pullTable
+// only ever adds/updates from the cloud, it never removes local-only
+// records, so the first trainer's clients would stay visible indefinitely.
+// Fixed: every local storage key is now namespaced by the logged-in
+// user's id (lsKeyFor/retryKeyFor), and onAuthed() reloads the envelope
+// fresh for whichever user just authenticated rather than trusting
+// whatever was already in memory. A one-time, lossless migration moves
+// any existing device's old shared-key data into the first post-upgrade
+// login's namespaced key, so nobody's existing data is lost.
+// (2) There was no way to sign out — onSignedOut() existed in code but no
+// button called it, so a session on a shared/borrowed device had no way
+// to be ended short of clearing browser data manually. Added a working
+// "Sign out" control in the Data & Backup modal.
+// Server-side: confirmed every push explicitly stamps trainer_id from the
+// current session, and Supabase RLS (auth.uid() = trainer_id, checked on
+// both read and write) is the backstop that makes cross-account writes
+// impossible even if client code were compromised — this release fixes
+// the client-side display/cache gap RLS alone doesn't cover.
 // v2.10: Real root-cause fix for the calendar showing an odd date range
 // (not just a labeling issue, as v2.9 assumed). addDaysIso() and
 // todayISO() built a Date at local midnight, then read it back via
@@ -372,6 +395,20 @@ const VERSION = '2.10';
 // are auto-created; programmes match clients by name, skipping and
 // reporting any that don't match rather than silently dropping them.
 const LS_KEY  = 'pt_companion_v1';
+const RETRY_KEY_BASE = 'pt_companion_retry_v1';
+// SECURITY FIX (v2.11): LS_KEY and the retry queue key used to be single,
+// unscoped localStorage keys shared by whoever happened to be logged in on
+// this device. If a second trainer logged in on the same browser after a
+// first one, the app loaded straight into the FIRST trainer's cached
+// clients/programmes/sessions — pullTable's merge only ever adds/updates
+// records from the cloud, it never removes local-only ones, so the first
+// trainer's data would sit there, visible, indefinitely. Every local key is
+// now namespaced by the logged-in user's id, so switching accounts on one
+// device can never show one trainer's data to another. See lsKeyFor/
+// retryKeyFor below, and how onAuthed() now reloads _env fresh per user
+// rather than relying on whatever was in memory at page load.
+function lsKeyFor(userId){ return LS_KEY + '_' + (userId || 'anon'); }
+function retryKeyFor(userId){ return RETRY_KEY_BASE + '_' + (userId || 'anon'); }
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
 // (version display is now static HTML above — see v1.5 note. Only the
@@ -439,28 +476,49 @@ async function sbFetch(path, options={}){
 function defaultEnv(){
   return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [], sessions: [], appointments: [] } };
 }
-let _env = load();
+// No user is known yet at page load — start empty. loadEnvForUser() runs
+// once a login succeeds (see onAuthed), replacing this with that user's
+// own namespaced data (or migrating the old shared key the first time, if
+// this device was used before the per-user storage fix).
+let _env = defaultEnv();
 let _envGeneration = 0; // guards against a stale in-flight pull overwriting a fresher import/replace
 
-function load(){
+function normalizeEnvShape(parsed){
+  parsed.data = parsed.data || {};
+  parsed.data.clients   = Array.isArray(parsed.data.clients)   ? parsed.data.clients   : [];
+  parsed.data.exercises = Array.isArray(parsed.data.exercises) ? parsed.data.exercises : [];
+  parsed.data.programs  = Array.isArray(parsed.data.programs)  ? parsed.data.programs  : [];
+  parsed.data.tags      = Array.isArray(parsed.data.tags)      ? parsed.data.tags      : [];
+  parsed.data.sessions  = Array.isArray(parsed.data.sessions)  ? parsed.data.sessions  : [];
+  parsed.data.appointments = Array.isArray(parsed.data.appointments) ? parsed.data.appointments : [];
+  migrateLegacySessions(parsed.data.sessions);
+  migrateLegacyClients(parsed.data.clients);
+  migrateLegacyExercises(parsed.data.exercises);
+  migrateProgramKinds(parsed.data.programs);
+  migrateLegacyProgramItems(parsed.data.programs);
+  return parsed;
+}
+
+function loadEnvForUser(userId){
+  const scopedKey = lsKeyFor(userId);
   try{
-    const raw = localStorage.getItem(LS_KEY);
+    let raw = localStorage.getItem(scopedKey);
+    if (!raw){
+      // One-time, lossless migration: before v2.11 all trainers on a device
+      // shared one unscoped key. If that legacy data exists and this user
+      // has no scoped copy yet, claim it as theirs (device previously had
+      // at most one trainer using it) rather than silently discarding it.
+      const legacy = localStorage.getItem(LS_KEY);
+      if (legacy){
+        localStorage.setItem(scopedKey, legacy);
+        localStorage.removeItem(LS_KEY);
+        raw = legacy;
+      }
+    }
     if (!raw) return defaultEnv();
     const parsed = JSON.parse(raw);
     if (typeof parsed.version !== 'number') throw new Error('Missing version field');
-    parsed.data = parsed.data || {};
-    parsed.data.clients   = Array.isArray(parsed.data.clients)   ? parsed.data.clients   : [];
-    parsed.data.exercises = Array.isArray(parsed.data.exercises) ? parsed.data.exercises : [];
-    parsed.data.programs  = Array.isArray(parsed.data.programs)  ? parsed.data.programs  : [];
-    parsed.data.tags      = Array.isArray(parsed.data.tags)      ? parsed.data.tags      : [];
-    parsed.data.sessions  = Array.isArray(parsed.data.sessions)  ? parsed.data.sessions  : [];
-    parsed.data.appointments = Array.isArray(parsed.data.appointments) ? parsed.data.appointments : [];
-    migrateLegacySessions(parsed.data.sessions);
-    migrateLegacyClients(parsed.data.clients);
-    migrateLegacyExercises(parsed.data.exercises);
-    migrateProgramKinds(parsed.data.programs);
-    migrateLegacyProgramItems(parsed.data.programs);
-    return parsed;
+    return normalizeEnvShape(parsed);
   }catch(e){
     console.error('Local envelope load failed, starting fresh:', e);
     return defaultEnv();
@@ -468,7 +526,7 @@ function load(){
 }
 function save(env){
   env.lastUpdated = new Date().toISOString();
-  localStorage.setItem(LS_KEY, JSON.stringify(env));
+  localStorage.setItem(lsKeyFor(getUserId()), JSON.stringify(env));
 }
 function uuid(){
   if (crypto.randomUUID) return crypto.randomUUID();
@@ -478,10 +536,18 @@ function uuid(){
 }
 
 // ---- Retry queue (persisted — survives reload/offline blips) -------------
-const RETRY_KEY = 'pt_companion_retry_v1';
-function loadRetryQueue(){ try{ return JSON.parse(localStorage.getItem(RETRY_KEY)) || []; }catch(e){ return []; } }
-function saveRetryQueue(q){ localStorage.setItem(RETRY_KEY, JSON.stringify(q)); }
-let _retryQueue = loadRetryQueue();
+function loadRetryQueueForUser(userId){
+  try{
+    let raw = localStorage.getItem(retryKeyFor(userId));
+    if (!raw){
+      const legacy = localStorage.getItem(RETRY_KEY_BASE);
+      if (legacy){ localStorage.setItem(retryKeyFor(userId), legacy); localStorage.removeItem(RETRY_KEY_BASE); raw = legacy; }
+    }
+    return raw ? (JSON.parse(raw) || []) : [];
+  }catch(e){ return []; }
+}
+function saveRetryQueue(q){ localStorage.setItem(retryKeyFor(getUserId()), JSON.stringify(q)); }
+let _retryQueue = [];
 
 function queueRetry(table, record){
   _retryQueue = _retryQueue.filter(r => !(r.table===table && r.record.id===record.id)); // dedupe, latest wins
@@ -544,8 +610,12 @@ async function initAuth(){
 
 function onAuthed(session){
   _session = session;
+  const uid = getUserId();
+  _env = loadEnvForUser(uid);
+  _retryQueue = loadRetryQueueForUser(uid);
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('appShell').classList.remove('hidden');
+  renderSyncStatus();
   renderMainArea();
   pullAll().then(()=>{ flushRetryQueue(); renderMainArea(); });
 }
@@ -553,6 +623,12 @@ function onSignedOut(){
   if (_session && _session.access_token) sbSignOut(_session.access_token);
   _session = null;
   localStorage.removeItem(SESSION_KEY);
+  // Defensive reset — the real protection is per-user storage keys (this
+  // user's own cache stays on disk for next time), but clearing memory too
+  // means nothing could linger on screen between sign-out and the next
+  // sign-in, even briefly.
+  _env = defaultEnv();
+  _retryQueue = [];
   document.getElementById('appShell').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('hidden');
 }
@@ -857,11 +933,22 @@ function openDataBackupModal(){
       </div>
       <div class="cMeta" style="margin-top:-6px;">Add exercises, reusable plans, or client programmes in bulk from a JSON file — download the template above to see the expected shape. Existing exercises are matched by name and skipped, not duplicated.</div>
       <div id="dbBulkResults"></div>
+
+      <h3 style="font-size:15px;margin:22px 0 10px;">Account</h3>
+      <div class="cMeta" style="margin-top:-4px;margin-bottom:10px;">Signing out is important on any shared or borrowed device — it clears this session so the next person who opens the app sees the login screen, not your clients.</div>
+      <div class="rowActions">
+        <button class="btnGhost btnDanger" id="dbSignOut" style="width:100%;">Sign out</button>
+      </div>
     </div>
   `;
   document.body.appendChild(backdrop);
   backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
   backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#dbSignOut').addEventListener('click', () => {
+    if (!confirm('Sign out of PT Companion on this device?')) return;
+    backdrop.remove();
+    onSignedOut();
+  });
 
   const statusEl = backdrop.querySelector('#dbStatus');
   statusEl.textContent = _syncState==='error' ? 'Sync error' : (getUserId() ? 'Connected' : 'Offline');
