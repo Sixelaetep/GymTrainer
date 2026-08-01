@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.2</title>
-<!-- PT Companion — version 2.2 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.3</title>
+<!-- PT Companion — version 2.3 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -158,6 +158,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   flex:1;min-width:0;padding:9px 8px;border-radius:8px;border:1px solid var(--line);
   background:var(--ink);color:var(--chalk);font-size:15px;
 }
+.li-tagpill{
+  display:inline-block;font-size:10.5px;padding:2px 7px;border-radius:10px;
+  background:var(--ink);border:1px solid var(--line);color:var(--chalk-dim);margin:0 4px 4px 0;
+}
 .badge.active{background:rgba(76,140,107,0.18);color:var(--good);}
 .badge.archived{background:rgba(255,255,255,0.08);color:var(--chalk-dim);}
 
@@ -286,13 +290,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.2</div>
+  <div class="loginVersion" id="loginVersion">v2.3</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.2</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.3</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -309,7 +313,6 @@ textarea.notesArea{
     <button class="navTab active" data-tab="clients"><span class="navIcon">👤</span>Clients</button>
     <button class="navTab" data-tab="templates"><span class="navIcon">📋</span>Templates</button>
     <button class="navTab" data-tab="exercises"><span class="navIcon">🏋️</span>Exercises</button>
-    <button class="navTab" data-tab="tags"><span class="navIcon">🏷️</span>Tags</button>
   </div>
 </div>
 
@@ -322,19 +325,20 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.2';
-// v2.2: Exercise picker & structured sets, matching Gym Tracker's actual
-// UX/data model more closely. The exercise dropdown (unusable at 65+
-// entries) is replaced with a live search returning tappable pill results
-// (name, trackType, top tags), plus a "+ Create as new exercise" pill when
-// there's no exact match — mirrors Gym Tracker's session-search pattern.
-// Target sets are no longer one free-text sets/reps/weight per item —
-// each item now holds an array of individual target sets, fields adapting
-// to the exercise's trackType (reps: reps+weight; time: min:sec;
-// distance: metres+min:sec+optional weight), with add/remove per set —
-// matching Gym Tracker's targetSets model. v2.0/v2.1 items migrate
-// automatically; anything that couldn't be cleanly parsed (e.g. "8-12"
-// rep ranges) is preserved in the item's notes rather than dropped.
+const VERSION = '2.3';
+// v2.3: Restored Gym Tracker's actual exercise/tag workflow, which v2.1's
+// separate Tags tab had made slower (an extra screen to leave and return
+// from mid-edit). Reverted to 3 bottom-nav tabs. Tags now manage inline
+// from the exercise editor: grouped-by-body-area toggle chips (matching
+// Gym Tracker's TAG_GROUPS presentation) with a selected-tags summary row,
+// plus an inline "add new tag" mini-form (name + body area) that creates
+// and auto-selects a tag without leaving the exercise sheet. A lightweight
+// "Manage tags" sheet (reachable from the Exercises tab) still exists for
+// bulk rename/delete. Exercise list also gained Gym Tracker's body-area
+// filter chips (All/Chest/Back/.../Other) above the search box, and tag
+// badges under each exercise name instead of a plain comma-joined line.
+// No visual/colour changes — Pete confirmed workflow was the actual ask,
+// not matching Gym Tracker's design system.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -630,14 +634,13 @@ function renderSyncStatus(){
 }
 
 // ---- Tab navigation --------------------------------------------------
-let _currentTab = 'clients'; // clients | templates | exercises | tags
+let _currentTab = 'clients'; // clients | templates | exercises
 
 function renderMainArea(){
   const search = document.getElementById('mainSearch');
   if (_currentTab === 'clients'){ search.placeholder = 'Search clients…'; renderClientList(); }
   else if (_currentTab === 'templates'){ search.placeholder = 'Search templates…'; renderTemplateList(); }
-  else if (_currentTab === 'exercises'){ search.placeholder = 'Search exercises…'; renderExerciseList(); }
-  else { search.placeholder = 'Search tags…'; renderTagList(); }
+  else { search.placeholder = 'Search exercises…'; renderExerciseList(); }
 }
 document.querySelectorAll('.navTab').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -651,8 +654,7 @@ document.getElementById('mainSearch').addEventListener('input', renderMainArea);
 document.getElementById('mainFab').addEventListener('click', () => {
   if (_currentTab === 'clients') openClientSheet(null);
   else if (_currentTab === 'templates') openTemplateSheet(null);
-  else if (_currentTab === 'exercises') openExerciseSheet(null);
-  else openTagSheet(null);
+  else openExerciseSheet(null);
 });
 
 function escHtml(s){
@@ -1385,28 +1387,54 @@ function migrateLegacyProgramItems(programs){
 // ---- Tags CRUD ---------------------------------------------------------
 function activeTags(){ return (_env.data.tags||[]).filter(t => !t._deleted); }
 
-function renderTagList(){
-  const q = (document.getElementById('mainSearch').value || '').toLowerCase();
-  const list = document.getElementById('mainList');
-  const tags = activeTags().filter(t => !q || (t.name||'').toLowerCase().includes(q))
-    .sort((a,b) => (a.bodyArea||'').localeCompare(b.bodyArea||'') || (a.name||'').localeCompare(b.name||''));
-  const seedBtn = '<div class="rowActions" style="margin-bottom:12px;"><button class="btnGhost" id="seedTagsBtn">+ Load starter tags (from Gym Tracker)</button></div>';
-  if (!tags.length){
-    list.innerHTML = seedBtn + '<div class="emptyState"><div class="glyph">🏷️</div>Add tags and assign them to a body area.</div>';
-  } else {
-    list.innerHTML = seedBtn + tags.map(t => `
-      <div class="clientCard" data-id="${escHtml(t.id)}">
-        <div><div class="cName">${escHtml(t.name)}</div></div>
-        <span class="badge active">${escHtml(t.bodyArea||'Other')}</span>
+function openTagManagerSheet(){
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>Manage tags</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="searchRow" style="margin:0 0 14px;"><input id="tmSearch" type="text" placeholder="Search tags…"></div>
+      <div id="tmList"></div>
+      <div class="rowActions" style="margin-top:14px;">
+        <button class="btnGhost" id="tmSeed">+ Load starter tags</button>
+        <button class="btnAmber" id="tmAdd">+ Add tag</button>
       </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  const listEl = backdrop.querySelector('#tmList');
+  const searchEl = backdrop.querySelector('#tmSearch');
+
+  function render(){
+    const q = searchEl.value.trim().toLowerCase();
+    const tags = activeTags().filter(t => !q || (t.name||'').toLowerCase().includes(q));
+    if (!tags.length){
+      listEl.innerHTML = '<div class="emptyState" style="padding:24px 10px;"><div class="glyph">🏷️</div>No tags yet.</div>';
+      return;
+    }
+    const groups = {};
+    tags.forEach(t => { const g = t.bodyArea || 'Other'; (groups[g] = groups[g]||[]).push(t); });
+    listEl.innerHTML = BODY_AREAS.concat('Other').filter(g => groups[g]).map(g => `
+      <div style="font-size:11px;color:var(--chalk-dim);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px;">${escHtml(g)}</div>
+      ${groups[g].map(t => `
+        <div class="clientCard" data-id="${escHtml(t.id)}" style="margin-bottom:6px;">
+          <div class="cName">${escHtml(t.name)}</div>
+        </div>
+      `).join('')}
     `).join('');
+    listEl.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openTagSheet(el.dataset.id, render)));
   }
-  list.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openTagSheet(el.dataset.id)));
-  const seed = list.querySelector('#seedTagsBtn');
-  if (seed) seed.addEventListener('click', loadStarterTags);
+  searchEl.addEventListener('input', render);
+  render();
+
+  backdrop.querySelector('#tmAdd').addEventListener('click', () => openTagSheet(null, render));
+  backdrop.querySelector('#tmSeed').addEventListener('click', () => loadStarterTags(render));
 }
 
-function openTagSheet(id){
+function openTagSheet(id, onDone){
   const tag = id ? (_env.data.tags||[]).find(t=>t.id===id) : { id: uuid(), name:'', bodyArea:'Other', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
   const isNew = !id;
   const backdrop = document.createElement('div');
@@ -1443,7 +1471,7 @@ function openTagSheet(id){
       _env.data.tags.push(tag);
     }
     persistAndSync('pt_tags', 'tags', tag);
-    renderTagList();
+    if (onDone) onDone(tag);
     backdrop.remove();
     toast(isNew ? 'Tag added' : 'Saved');
   });
@@ -1452,13 +1480,13 @@ function openTagSheet(id){
     if (!confirm(`Delete tag "${tag.name}"? This can't be undone.`)) return;
     tag._deleted = true; tag.updatedAt = new Date().toISOString();
     persistAndSync('pt_tags', 'tags', tag);
-    renderTagList();
+    if (onDone) onDone(null);
     backdrop.remove();
     toast('Tag deleted');
   });
 }
 
-function loadStarterTags(){
+function loadStarterTags(onDone){
   const existingNames = new Set(activeTags().map(t => t.name.toLowerCase()));
   const now = new Date().toISOString();
   let added = 0;
@@ -1471,30 +1499,59 @@ function loadStarterTags(){
     existingNames.add(item.name.toLowerCase());
     added++;
   });
-  renderTagList();
+  if (onDone) onDone();
   toast(added ? `Added ${added} tag${added===1?'':'s'} ✓` : 'All starter tags already in your library');
 }
 
 // ---- Exercises CRUD ---------------------------------------------------
+let _exAreaFilter = 'All';
+function exerciseMatchesArea(e, area){
+  if (area === 'All') return true;
+  const tagObjs = (e.tags||[]).map(name => activeTags().find(t=>t.name===name)).filter(Boolean);
+  if (area === 'Other') return !e.tags.length || tagObjs.some(t => t.bodyArea==='Other') || e.tags.some(name => !activeTags().some(t=>t.name===name));
+  return tagObjs.some(t => t.bodyArea === area);
+}
+function renderAreaChips(container){
+  const all = ['All', ...BODY_AREAS, 'Other'];
+  container.innerHTML = all.map(a => `<button type="button" class="tagChip ${_exAreaFilter===a?'on':''}" data-area="${escHtml(a)}" style="margin-bottom:8px;">${escHtml(a)}</button>`).join('');
+  container.querySelectorAll('[data-area]').forEach(btn => {
+    btn.addEventListener('click', () => { _exAreaFilter = btn.dataset.area; renderExerciseList(); });
+  });
+}
+
 function renderExerciseList(){
   const q = (document.getElementById('mainSearch').value || '').toLowerCase();
   const list = document.getElementById('mainList');
-  const exercises = (_env.data.exercises||[]).filter(e => !e._deleted && (!q || (e.name||'').toLowerCase().includes(q) || (e.tags||[]).some(t=>t.toLowerCase().includes(q))))
+  const exercises = (_env.data.exercises||[]).filter(e => !e._deleted
+    && (!q || (e.name||'').toLowerCase().includes(q) || (e.tags||[]).some(t=>t.toLowerCase().includes(q)))
+    && exerciseMatchesArea(e, _exAreaFilter))
     .sort((a,b) => (a.name||'').localeCompare(b.name||''));
-  const seedBtn = '<div class="rowActions" style="margin-bottom:12px;"><button class="btnGhost" id="seedExBtn">+ Load starter library (from Gym Tracker)</button></div>';
+  const topBar = `
+    <div id="exAreaChips" style="margin-bottom:10px;"></div>
+    <div class="rowActions" style="margin-bottom:12px;">
+      <button class="btnGhost" id="seedExBtn">+ Load starter library</button>
+      <button class="btnGhost" id="manageTagsBtn">🏷️ Manage tags</button>
+    </div>
+  `;
   if (!exercises.length){
-    list.innerHTML = seedBtn + '<div class="emptyState"><div class="glyph">🏋️</div>Add exercises to build programmes from.</div>';
+    list.innerHTML = topBar + '<div class="emptyState"><div class="glyph">🏋️</div>Add exercises to build programmes from.</div>';
   } else {
-    list.innerHTML = seedBtn + exercises.map(e => `
-      <div class="clientCard" data-id="${escHtml(e.id)}">
-        <div><div class="cName">${escHtml(e.name)}</div><div class="cMeta">${escHtml(e.trackType||'reps')}${(e.tags&&e.tags.length) ? ' · '+escHtml(e.tags.join(', ')) : ''}</div></div>
+    list.innerHTML = topBar + exercises.map(e => `
+      <div class="clientCard" data-id="${escHtml(e.id)}" style="align-items:flex-start;">
+        <div>
+          <div class="cName">${escHtml(e.name)} <span class="badge active" style="margin-left:4px;">${escHtml(e.trackType||'reps')}</span></div>
+          <div class="cMeta" style="margin-top:5px;">${(e.tags&&e.tags.length) ? e.tags.map(t=>`<span class="li-tagpill">${escHtml(t)}</span>`).join(' ') : '<span style="opacity:0.6;">No tags</span>'}</div>
+        </div>
         <span class="badge ${e.status==='archived'?'archived':'active'}">${e.status==='archived'?'Archived':'Active'}</span>
       </div>
     `).join('');
   }
+  renderAreaChips(list.querySelector('#exAreaChips'));
   list.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openExerciseSheet(el.dataset.id)));
   const seed = list.querySelector('#seedExBtn');
   if (seed) seed.addEventListener('click', loadStarterExercises);
+  const manageTags = list.querySelector('#manageTagsBtn');
+  if (manageTags) manageTags.addEventListener('click', openTagManagerSheet);
 }
 
 function openExerciseSheet(id){
@@ -1533,21 +1590,59 @@ function openExerciseSheet(id){
 
   const chipsEl = backdrop.querySelector('#efTagChips');
   function renderChips(){
-    const available = activeTags();
-    if (!available.length){
-      chipsEl.innerHTML = '<div class="cMeta">No tags yet — add some in the Tags tab first.</div>';
-      return;
-    }
-    chipsEl.innerHTML = available.map(t => `
-      <button type="button" class="tagChip ${selectedTags.includes(t.name)?'on':''}" data-tag="${escHtml(t.name)}">${escHtml(t.name)}</button>
-    `).join('');
-    chipsEl.querySelectorAll('.tagChip').forEach(chip => {
+    const selectedSummary = selectedTags.length
+      ? selectedTags.map(t => `<button type="button" class="tagChip on" data-remove-tag="${escHtml(t)}" style="margin-bottom:6px;">${escHtml(t)} ✕</button>`).join('')
+      : '<div class="cMeta" style="margin-bottom:6px;">No tags selected yet — tap below to add.</div>';
+
+    const byArea = {};
+    activeTags().forEach(t => { const g = t.bodyArea || 'Other'; (byArea[g] = byArea[g]||[]).push(t); });
+    const groupsHtml = BODY_AREAS.concat('Other').filter(g => byArea[g] && byArea[g].length).map(g => `
+      <div style="font-size:11px;color:var(--chalk-dim);text-transform:uppercase;letter-spacing:.04em;margin:10px 0 6px;">${escHtml(g)}</div>
+      ${byArea[g].map(t => `<button type="button" class="tagChip ${selectedTags.includes(t.name)?'on':''}" data-tag="${escHtml(t.name)}">${escHtml(t.name)}</button>`).join('')}
+    `).join('') || '<div class="cMeta">No tags in your library yet — add one below.</div>';
+
+    chipsEl.innerHTML = `
+      <div style="margin-bottom:4px;">${selectedSummary}</div>
+      ${groupsHtml}
+      <div style="display:flex;gap:6px;margin-top:12px;">
+        <input id="efNewTagName" type="text" placeholder="New tag name" style="flex:1;min-width:0;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:15px;">
+        <select id="efNewTagArea" style="padding:9px 6px;border-radius:8px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:14px;">
+          ${BODY_AREAS.map(a => `<option value="${a}">${a}</option>`).join('')}
+        </select>
+        <button type="button" class="btnGhost" id="efAddTagBtn" style="flex:0 0 auto;padding:9px 12px;">Add</button>
+      </div>
+    `;
+    chipsEl.querySelectorAll('[data-tag]').forEach(chip => {
       chip.addEventListener('click', () => {
         const name = chip.dataset.tag;
         if (selectedTags.includes(name)) selectedTags = selectedTags.filter(t=>t!==name);
         else selectedTags.push(name);
         renderChips();
       });
+    });
+    chipsEl.querySelectorAll('[data-remove-tag]').forEach(chip => {
+      chip.addEventListener('click', () => { selectedTags = selectedTags.filter(t=>t!==chip.dataset.removeTag); renderChips(); });
+    });
+    chipsEl.querySelector('#efAddTagBtn').addEventListener('click', () => {
+      const nameEl = chipsEl.querySelector('#efNewTagName');
+      const name = nameEl.value.trim();
+      if (!name){ toast('Enter a tag name'); return; }
+      const dupe = activeTags().find(t => t.name.toLowerCase()===name.toLowerCase());
+      if (dupe){
+        if (!selectedTags.includes(dupe.name)) selectedTags.push(dupe.name);
+        renderChips();
+        toast('That tag already exists — selected it for you');
+        return;
+      }
+      const area = chipsEl.querySelector('#efNewTagArea').value;
+      const now = new Date().toISOString();
+      const record = { id: uuid(), name, bodyArea: area, createdAt: now, updatedAt: now };
+      _env.data.tags = _env.data.tags || [];
+      _env.data.tags.push(record);
+      persistAndSync('pt_tags', 'tags', record);
+      selectedTags.push(name);
+      renderChips();
+      toast('Tag added');
     });
   }
   renderChips();
