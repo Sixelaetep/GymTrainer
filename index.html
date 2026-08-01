@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.7</title>
-<!-- PT Companion — version 2.7 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.8</title>
+<!-- PT Companion — version 2.8 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -301,13 +301,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.7</div>
+  <div class="loginVersion" id="loginVersion">v2.8</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.7</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.8</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -337,20 +337,21 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.7';
-// v2.7: PT session review is now a working draft of the next programme,
-// not just free-text boxes. Selecting a programme to review brings its
-// plans through as collapsible sections; each exercise shows its current
-// target with a note field ("changes or issues") and an "Adjust" button
-// that opens the same target-set editor used everywhere else, so bumping
-// a weight or rep target takes one tap. New exercises can be added to a
-// plan during review, whole plans can be replaced (pick a different
-// library plan, or go blank) or dropped, and more plans can be added.
-// "Create next programme from this review" now builds the new programme
-// from this edited draft — carrying forward exactly what was decided,
-// including any added exercises or swapped plans — rather than a blind
-// duplicate of the old one. Per-exercise notes are working memory for the
-// review itself and aren't carried into the saved programme.
+const VERSION = '2.8';
+// v2.8: Data & Backup modal, opened from the sync pill (replaces the old
+// immediate-sync-on-tap behaviour — sync now happens via a "Sync now"
+// button inside the modal). Full JSON export/import for manual backups:
+// export downloads the complete envelope; import replaces all local data
+// with the file's contents (confirmed first — irreversible), bumps every
+// record's updatedAt to import time so the restore wins the next sync
+// regardless of what's in the cloud, re-runs all migrations in case the
+// backup predates this version, and pushes everything to the cloud.
+// Also: a templated bulk importer for exercises, plans, and client
+// programmes from one JSON file (download the template to see the shape).
+// Exercises are matched by name and skipped if they already exist rather
+// than duplicated; missing exercises referenced by a plan/programme item
+// are auto-created; programmes match clients by name, skipping and
+// reporting any that don't match rather than silently dropping them.
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -635,14 +636,7 @@ function persistAndSync(table, localArrKey, record){
   pushRecord(table, record, false);
 }
 
-document.getElementById('syncBtn').addEventListener('click', async () => {
-  if (!getUserId()){ toast('Not connected to cloud'); return; }
-  _syncState = 'syncing'; renderSyncStatus();
-  await pullAll();
-  await flushRetryQueue();
-  renderMainArea();
-  toast('Synced ✓');
-});
+document.getElementById('syncBtn').addEventListener('click', openDataBackupModal);
 
 function renderSyncStatus(){
   const dot = document.getElementById('syncDot');
@@ -653,6 +647,276 @@ function renderSyncStatus(){
   else if (_syncState==='error') label.textContent = 'Sync error';
   else if (getUserId()) label.textContent = 'Synced';
   else label.textContent = 'Offline';
+}
+
+// ---- Data & Backup modal (full export/import + templated bulk import) ---
+function downloadJSON(filename, dataObj){
+  const blob = new Blob([JSON.stringify(dataObj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+const BULK_IMPORT_TEMPLATE = {
+  exercises: [
+    { name: "Barbell Back Squat", trackType: "reps", tags: ["Quads","Glutes","Core"], notes: "Brace, knees track over toes" },
+    { name: "Plank", trackType: "time", tags: ["Core"], notes: "" }
+  ],
+  plans: [
+    {
+      name: "Day 1 - Push",
+      notes: "Upper body push focus",
+      items: [
+        { exerciseName: "Barbell Back Squat", trackType: "reps", targetSets: [ {reps:8, weight:40}, {reps:8, weight:40} ], notes: "" }
+      ]
+    }
+  ],
+  programs: [
+    {
+      clientName: "Jane Smith",
+      name: "August Block",
+      startDate: "2026-08-01",
+      durationWeeks: 4,
+      notes: "",
+      plans: [
+        { name: "Day 1 - Push", items: [ { exerciseName: "Barbell Back Squat", trackType: "reps", targetSets: [ {reps:8, weight:40} ] } ] }
+      ]
+    }
+  ]
+};
+// Notes for anyone editing this file by hand:
+// - All three top-level keys (exercises/plans/programs) are optional — include only what you're importing.
+// - trackType is one of "reps" | "time" | "distance". For "time" sets use {"seconds": N}. For "distance" use {"metres": N, "seconds": N, "weight": N (optional)}.
+// - exerciseName is matched case-insensitively against your existing library; if not found, a new exercise is created automatically using the trackType given (defaults to "reps").
+// - clientName is matched case-insensitively against your existing clients; programmes for unmatched names are skipped and reported, not silently dropped.
+// - Importing a programme archives that client's current active programme, same as creating one normally.
+
+function findOrCreateExercise(name, trackType){
+  name = (name||'').trim();
+  if (!name) return null;
+  const existing = (_env.data.exercises||[]).find(e => !e._deleted && e.name.toLowerCase() === name.toLowerCase());
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const ex = { id: uuid(), name, trackType: trackType || 'reps', tags: [], notes: '', status: 'active', createdAt: now, updatedAt: now };
+  _env.data.exercises = _env.data.exercises || [];
+  _env.data.exercises.push(ex);
+  persistAndSync('pt_exercises', 'exercises', ex);
+  return ex;
+}
+
+function buildImportedItem(rawItem){
+  const trackType = rawItem.trackType || 'reps';
+  const ex = findOrCreateExercise(rawItem.exerciseName, trackType);
+  if (!ex) return null;
+  const targetSets = Array.isArray(rawItem.targetSets) && rawItem.targetSets.length
+    ? rawItem.targetSets.map(s => Object.assign({}, s))
+    : [defaultSetForType(trackType)];
+  return { itemId: uuid(), exerciseId: ex.id, exerciseName: ex.name, trackType, targetSets, notes: rawItem.notes || '' };
+}
+
+function runBulkImport(parsed){
+  const result = { exercisesAdded:0, exercisesSkipped:0, plansAdded:0, programsAdded:0, programsSkipped:0, warnings:[] };
+
+  (parsed.exercises||[]).forEach(item => {
+    if (!item.name){ result.warnings.push('Skipped an exercise with no name'); return; }
+    const existing = (_env.data.exercises||[]).find(e => !e._deleted && e.name.toLowerCase() === item.name.toLowerCase());
+    if (existing){ result.exercisesSkipped++; return; }
+    const now = new Date().toISOString();
+    const ex = { id: uuid(), name: item.name, trackType: item.trackType || 'reps', tags: Array.isArray(item.tags) ? item.tags.slice() : [], notes: item.notes || '', status: 'active', createdAt: now, updatedAt: now };
+    _env.data.exercises = _env.data.exercises || [];
+    _env.data.exercises.push(ex);
+    persistAndSync('pt_exercises', 'exercises', ex);
+    result.exercisesAdded++;
+  });
+
+  (parsed.plans||[]).forEach(planDef => {
+    if (!planDef.name){ result.warnings.push('Skipped a plan with no name'); return; }
+    const items = (planDef.items||[]).map(buildImportedItem).filter(Boolean);
+    const now = new Date().toISOString();
+    const plan = { id: uuid(), kind:'plan', clientId:null, name: planDef.name, notes: planDef.notes || '', items, createdAt: now, updatedAt: now };
+    _env.data.programs = _env.data.programs || [];
+    _env.data.programs.push(plan);
+    persistAndSync('pt_programs', 'programs', plan);
+    result.plansAdded++;
+  });
+
+  (parsed.programs||[]).forEach(progDef => {
+    if (!progDef.clientName){ result.warnings.push(`Skipped programme "${progDef.name||'(unnamed)'}" — no clientName given`); return; }
+    const client = (_env.data.clients||[]).find(c => !c._deleted && c.name.toLowerCase() === progDef.clientName.toLowerCase());
+    if (!client){ result.warnings.push(`Skipped programme "${progDef.name||'(unnamed)'}" — no client named "${progDef.clientName}"`); result.programsSkipped++; return; }
+    const existingActive = activeProgrammeFor(client.id);
+    if (existingActive){
+      existingActive.status = 'archived'; existingActive.updatedAt = new Date().toISOString();
+      persistAndSync('pt_programs', 'programs', existingActive);
+    }
+    const now = new Date().toISOString();
+    const plans = (progDef.plans||[]).map(pl => ({
+      id: uuid(), name: pl.name || 'Plan',
+      items: (pl.items||[]).map(buildImportedItem).filter(Boolean)
+    }));
+    const prog = {
+      id: uuid(), kind:'programme', clientId: client.id, name: progDef.name || 'Imported programme',
+      startDate: progDef.startDate || todayISO(), durationWeeks: progDef.durationWeeks != null ? progDef.durationWeeks : null,
+      notes: progDef.notes || '', status:'active', plans, createdAt: now, updatedAt: now
+    };
+    _env.data.programs = _env.data.programs || [];
+    _env.data.programs.push(prog);
+    persistAndSync('pt_programs', 'programs', prog);
+    result.programsAdded++;
+  });
+
+  save(_env);
+  return result;
+}
+
+// Restoring a full backup replaces local data wholesale. Per the suite's
+// established pattern: imported records' updatedAt is bumped to import
+// time so the restore wins the next sync/pull regardless of what's
+// already in the cloud — restoring a backup is a deliberate "this is the
+// truth now" action. All migrations re-run in case the backup predates
+// the current version.
+function restoreFullBackup(parsed){
+  const now = new Date().toISOString();
+  const data = parsed.data || {};
+  const bump = (arr) => (Array.isArray(arr)?arr:[]).map(r => Object.assign({}, r, { updatedAt: now }));
+
+  _env.data.clients = bump(data.clients);
+  _env.data.exercises = bump(data.exercises);
+  _env.data.programs = bump(data.programs);
+  _env.data.tags = bump(data.tags);
+  _env.data.sessions = bump(data.sessions);
+  _env.data.appointments = bump(data.appointments);
+
+  migrateLegacyClients(_env.data.clients);
+  migrateLegacyExercises(_env.data.exercises);
+  migrateProgramKinds(_env.data.programs);
+  migrateLegacyProgramItems(_env.data.programs);
+  migrateLegacySessions(_env.data.sessions);
+
+  _envGeneration++; // invalidate any in-flight pull so it can't clobber this restore
+  save(_env);
+
+  // Push everything to cloud so the restore actually propagates, not just
+  // sits locally until the next unrelated edit happens to sync it.
+  ['clients','exercises','programs','tags','sessions','appointments'].forEach(key => {
+    const table = { clients:'pt_clients', exercises:'pt_exercises', programs:'pt_programs', tags:'pt_tags', sessions:'pt_sessions', appointments:'pt_appointments' }[key];
+    (_env.data[key]||[]).forEach(record => pushRecord(table, record, false));
+  });
+}
+
+function openDataBackupModal(){
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>Data &amp; Backup</h2><button class="iconBtn" data-close>✕</button></div>
+
+      <div class="drawerRow"><span>Status</span><span id="dbStatus"></span></div>
+      <div class="drawerRow"><span>Pending changes</span><span>${_retryQueue.length}</span></div>
+      <div class="rowActions"><button class="btnAmber" id="dbSyncNow" style="width:100%;">Sync now</button></div>
+
+      <h3 style="font-size:15px;margin:22px 0 10px;">Full backup</h3>
+      <div class="rowActions">
+        <button class="btnGhost" id="dbExport">⬇ Export full backup (.json)</button>
+      </div>
+      <div class="rowActions">
+        <button class="btnGhost" id="dbImportBackupBtn">⬆ Import full backup (.json)</button>
+        <input type="file" accept="application/json" id="dbImportBackupFile" class="hidden">
+      </div>
+      <div class="cMeta" style="margin-top:-6px;">Importing a full backup replaces all local data with the file's contents, then pushes it to the cloud. Use for restoring after a device loss, not routine syncing.</div>
+
+      <h3 style="font-size:15px;margin:22px 0 10px;">Bulk import — exercises, plans &amp; programmes</h3>
+      <div class="rowActions">
+        <button class="btnGhost" id="dbTemplate">⬇ Download import template (.json)</button>
+      </div>
+      <div class="rowActions">
+        <button class="btnGhost" id="dbImportBulkBtn">⬆ Import list (.json)</button>
+        <input type="file" accept="application/json" id="dbImportBulkFile" class="hidden">
+      </div>
+      <div class="cMeta" style="margin-top:-6px;">Add exercises, reusable plans, or client programmes in bulk from a JSON file — download the template above to see the expected shape. Existing exercises are matched by name and skipped, not duplicated.</div>
+      <div id="dbBulkResults"></div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+
+  const statusEl = backdrop.querySelector('#dbStatus');
+  statusEl.textContent = _syncState==='error' ? 'Sync error' : (getUserId() ? 'Connected' : 'Offline');
+
+  backdrop.querySelector('#dbSyncNow').addEventListener('click', async () => {
+    if (!getUserId()){ toast('Not connected to cloud'); return; }
+    _syncState = 'syncing'; renderSyncStatus();
+    await pullAll();
+    await flushRetryQueue();
+    renderMainArea();
+    statusEl.textContent = 'Connected';
+    toast('Synced ✓');
+  });
+
+  backdrop.querySelector('#dbExport').addEventListener('click', () => {
+    _env.lastExported = new Date().toISOString();
+    save(_env);
+    downloadJSON(`pt-companion-backup-${todayISO()}.json`, _env);
+    toast('Backup downloaded');
+  });
+
+  backdrop.querySelector('#dbTemplate').addEventListener('click', () => {
+    downloadJSON('pt-companion-import-template.json', BULK_IMPORT_TEMPLATE);
+    toast('Template downloaded');
+  });
+
+  const importBackupBtn = backdrop.querySelector('#dbImportBackupBtn');
+  const importBackupFile = backdrop.querySelector('#dbImportBackupFile');
+  importBackupBtn.addEventListener('click', () => importBackupFile.click());
+  importBackupFile.addEventListener('change', () => {
+    const file = importBackupFile.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let parsed;
+      try{ parsed = JSON.parse(reader.result); }
+      catch(e){ toast('That file is not valid JSON'); return; }
+      if (typeof parsed.version !== 'number' || !parsed.data){ toast('That doesn\'t look like a PT Companion backup file'); return; }
+      if (!confirm('Import this backup? This replaces ALL local data (clients, exercises, plans, programmes, sessions, appointments) with the contents of this file, and pushes it to the cloud. This cannot be undone.')) return;
+      restoreFullBackup(parsed);
+      backdrop.remove();
+      renderMainArea();
+      toast('Backup restored ✓');
+    };
+    reader.readAsText(file);
+  });
+
+  const importBulkBtn = backdrop.querySelector('#dbImportBulkBtn');
+  const importBulkFile = backdrop.querySelector('#dbImportBulkFile');
+  const resultsEl = backdrop.querySelector('#dbBulkResults');
+  importBulkBtn.addEventListener('click', () => importBulkFile.click());
+  importBulkFile.addEventListener('change', () => {
+    const file = importBulkFile.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let parsed;
+      try{ parsed = JSON.parse(reader.result); }
+      catch(e){ toast('That file is not valid JSON'); return; }
+      const result = runBulkImport(parsed);
+      resultsEl.innerHTML = `
+        <div class="phasePlaceholder" style="text-align:left;padding:14px 16px;">
+          <strong>Import complete</strong><br>
+          ${result.exercisesAdded} exercise${result.exercisesAdded===1?'':'s'} added${result.exercisesSkipped?' · '+result.exercisesSkipped+' already existed':''}<br>
+          ${result.plansAdded} plan${result.plansAdded===1?'':'s'} added<br>
+          ${result.programsAdded} programme${result.programsAdded===1?'':'s'} added${result.programsSkipped?' · '+result.programsSkipped+' skipped':''}
+          ${result.warnings.length ? '<br><br>⚠️ ' + result.warnings.map(escHtml).join('<br>⚠️ ') : ''}
+        </div>
+      `;
+      renderMainArea();
+      toast('Bulk import complete');
+    };
+    reader.readAsText(file);
+  });
 }
 
 // ---- Tab navigation --------------------------------------------------
