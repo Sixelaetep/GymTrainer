@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.4</title>
-<!-- PT Companion — version 2.4 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.5</title>
+<!-- PT Companion — version 2.5 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -162,6 +162,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   display:inline-block;font-size:10.5px;padding:2px 7px;border-radius:10px;
   background:var(--ink);border:1px solid var(--line);color:var(--chalk-dim);margin:0 4px 4px 0;
 }
+
+.calDayChip{
+  background:var(--ink-soft);border:1px solid var(--line);border-radius:10px;
+  padding:8px 2px;color:var(--chalk);position:relative;text-align:center;
+}
+.calDayChip .cdLabel{font-size:10px;color:var(--chalk-dim);text-transform:uppercase;}
+.calDayChip .cdNum{font-size:17px;font-weight:700;margin-top:2px;}
+.calDayChip.today .cdNum{color:var(--amber);}
+.calDayChip.selected{border-color:var(--amber);background:rgba(232,163,61,0.1);}
+.calDayChip .cdDot{width:5px;height:5px;border-radius:50%;background:var(--amber);margin:4px auto 0;}
+
 .badge.active{background:rgba(76,140,107,0.18);color:var(--good);}
 .badge.archived{background:rgba(255,255,255,0.08);color:var(--chalk-dim);}
 
@@ -290,13 +301,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase — there's no sign-up here. Lost access? Ask them to reset your password.</div>
-  <div class="loginVersion" id="loginVersion">v2.4</div>
+  <div class="loginVersion" id="loginVersion">v2.5</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.4</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.5</span></h1>
     <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
   </div>
 
@@ -311,6 +322,7 @@ textarea.notesArea{
 
   <div id="bottomNav">
     <button class="navTab active" data-tab="clients"><span class="navIcon">👤</span>Clients</button>
+    <button class="navTab" data-tab="calendar"><span class="navIcon">📅</span>Calendar</button>
     <button class="navTab" data-tab="templates"><span class="navIcon">📋</span>Templates</button>
     <button class="navTab" data-tab="exercises"><span class="navIcon">🏋️</span>Exercises</button>
   </div>
@@ -325,19 +337,18 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.4';
-// v2.4: Sessions & Insights. Session logging is freeform — pick any
-// exercise via the same search+pill picker used for programmes, log actual
-// sets (reps/weight, time, or distance depending on the exercise), see the
-// client's current programme target as a passive reference if one exists
-// for that exercise. Insights tab: adherence summary (total sessions,
-// sessions in the last 30 days, days since last session) plus a
-// progression sparkline per exercise once it's been logged in 2+ sessions
-// — reps exercises track heaviest weight (or most reps if unweighted),
-// time exercises track longest duration, distance exercises track
-// furthest distance. Refactored the shared exercise-picker and
-// per-type set-builder out of the programme item editor so sessions
-// reuse the exact same tested UI rather than duplicating it.
+const VERSION = '2.5';
+// v2.5: Sessions redesigned as PT reviews (not workout logs) — date, linked
+// programme, review notes (how it's gone since last time), progression
+// notes (what to change), with optional exercise-performance logging kept
+// as supporting detail. "Create next programme from this review" archives
+// the reviewed programme and spins up a fresh active copy to edit.
+// New: booking Calendar tab — simple week strip, tap a day to see/add
+// appointments. Booking a slot creates its linked PT session directly,
+// ready to fill in after the meeting; tapping an appointment jumps to
+// that client's card, Sessions tab, with the linked session highlighted.
+// New pt_appointments table (run the v2.5 SQL add-on). v2.4 sessions
+// migrate automatically (old freeform notes -> reviewNotes).
 const LS_KEY  = 'pt_companion_v1';
 
 // ---- Critical UI: runs first, unconditionally, before anything risky -----
@@ -404,7 +415,7 @@ async function sbFetch(path, options={}){
 // Backwards-compatible: a v1.6 backup with only `clients` still loads fine —
 // exercises/programs default to empty arrays rather than failing.
 function defaultEnv(){
-  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [], sessions: [] } };
+  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [], sessions: [], appointments: [] } };
 }
 let _env = load();
 let _envGeneration = 0; // guards against a stale in-flight pull overwriting a fresher import/replace
@@ -421,6 +432,8 @@ function load(){
     parsed.data.programs  = Array.isArray(parsed.data.programs)  ? parsed.data.programs  : [];
     parsed.data.tags      = Array.isArray(parsed.data.tags)      ? parsed.data.tags      : [];
     parsed.data.sessions  = Array.isArray(parsed.data.sessions)  ? parsed.data.sessions  : [];
+    parsed.data.appointments = Array.isArray(parsed.data.appointments) ? parsed.data.appointments : [];
+    migrateLegacySessions(parsed.data.sessions);
     migrateLegacyExercises(parsed.data.exercises);
     migrateLegacyProgramItems(parsed.data.programs);
     return parsed;
@@ -603,6 +616,8 @@ async function pullAll(){
   await pullTable('pt_programs', 'programs');
   await pullTable('pt_tags', 'tags');
   await pullTable('pt_sessions', 'sessions');
+  await pullTable('pt_appointments', 'appointments');
+  migrateLegacySessions(_env.data.sessions);
   migrateLegacyExercises(_env.data.exercises);
   migrateLegacyProgramItems(_env.data.programs);
   save(_env);
@@ -635,11 +650,14 @@ function renderSyncStatus(){
 }
 
 // ---- Tab navigation --------------------------------------------------
-let _currentTab = 'clients'; // clients | templates | exercises
+let _currentTab = 'clients'; // clients | calendar | templates | exercises
 
 function renderMainArea(){
   const search = document.getElementById('mainSearch');
+  const searchRow = document.querySelector('.searchRow');
+  searchRow.classList.toggle('hidden', _currentTab === 'calendar');
   if (_currentTab === 'clients'){ search.placeholder = 'Search clients…'; renderClientList(); }
+  else if (_currentTab === 'calendar'){ renderCalendarTab(); }
   else if (_currentTab === 'templates'){ search.placeholder = 'Search templates…'; renderTemplateList(); }
   else { search.placeholder = 'Search exercises…'; renderExerciseList(); }
 }
@@ -654,6 +672,7 @@ document.querySelectorAll('.navTab').forEach(btn => {
 document.getElementById('mainSearch').addEventListener('input', renderMainArea);
 document.getElementById('mainFab').addEventListener('click', () => {
   if (_currentTab === 'clients') openClientSheet(null);
+  else if (_currentTab === 'calendar') openAppointmentSheet(_calSelectedDate || todayISO());
   else if (_currentTab === 'templates') openTemplateSheet(null);
   else openExerciseSheet(null);
 });
@@ -694,7 +713,8 @@ function newClientSkeleton(){
   return { id: uuid(), name:'', goals:'', notes:'', status:'active', createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
 }
 
-function openClientSheet(id){
+function openClientSheet(id, initialTab, highlightSessionId){
+  initialTab = initialTab || 'overview';
   const client = id ? (_env.data.clients||[]).find(c=>c.id===id) : newClientSkeleton();
   const isNew = !id;
   const backdrop = document.createElement('div');
@@ -707,10 +727,10 @@ function openClientSheet(id){
         <button class="iconBtn" data-close>✕</button>
       </div>
       <div class="tabRow" id="clientTabRow">
-        <button class="tabBtn active" data-ctab="overview">Overview</button>
-        <button class="tabBtn" data-ctab="programme" ${isNew?'disabled title="Save the client first"':''}>Programme</button>
-        <button class="tabBtn" data-ctab="sessions" ${isNew?'disabled title="Save the client first"':''}>Sessions</button>
-        <button class="tabBtn" data-ctab="insights" ${isNew?'disabled title="Save the client first"':''}>Insights</button>
+        <button class="tabBtn ${initialTab==='overview'?'active':''}" data-ctab="overview">Overview</button>
+        <button class="tabBtn ${initialTab==='programme'?'active':''}" data-ctab="programme" ${isNew?'disabled title="Save the client first"':''}>Programme</button>
+        <button class="tabBtn ${initialTab==='sessions'?'active':''}" data-ctab="sessions" ${isNew?'disabled title="Save the client first"':''}>Sessions</button>
+        <button class="tabBtn ${initialTab==='insights'?'active':''}" data-ctab="insights" ${isNew?'disabled title="Save the client first"':''}>Insights</button>
       </div>
       <div id="clientSheetBody"></div>
     </div>
@@ -725,10 +745,10 @@ function openClientSheet(id){
       renderClientSheetBody(backdrop, client, isNew, btn.dataset.ctab);
     });
   });
-  renderClientSheetBody(backdrop, client, isNew, 'overview');
+  renderClientSheetBody(backdrop, client, isNew, initialTab, highlightSessionId);
 }
 
-function renderClientSheetBody(backdrop, client, isNew, tab){
+function renderClientSheetBody(backdrop, client, isNew, tab, highlightSessionId){
   const body = backdrop.querySelector('#clientSheetBody');
   if (tab === 'overview'){
     body.innerHTML = `
@@ -779,7 +799,7 @@ function renderClientSheetBody(backdrop, client, isNew, tab){
   } else if (tab === 'programme'){
     renderClientProgrammeTab(body, client);
   } else if (tab === 'sessions'){
-    renderClientSessionsTab(body, client);
+    renderClientSessionsTab(body, client, highlightSessionId);
   } else if (tab === 'insights'){
     renderClientInsightsTab(body, client);
   }
@@ -1260,27 +1280,183 @@ function openTemplatePicker(onPick){
   }
 }
 
-// ---- Client Sessions tab (freeform logging) ---------------------------
+// ---- Calendar (appointment booking) ------------------------------------
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+function addDaysIso(iso, days){
+  const d = new Date(iso + 'T00:00:00');
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0,10);
+}
+function mondayOf(iso){
+  const d = new Date(iso + 'T00:00:00');
+  const dow = d.getDay(); // 0=Sun..6=Sat
+  const diff = dow === 0 ? -6 : 1 - dow;
+  return addDaysIso(iso, diff);
+}
+let _calWeekStart = mondayOf(todayISO());
+let _calSelectedDate = todayISO();
+
+function activeAppointments(){ return (_env.data.appointments||[]).filter(a => !a._deleted); }
+function appointmentsOnDate(iso){
+  return activeAppointments().filter(a => a.date === iso).sort((a,b) => (a.time||'').localeCompare(b.time||''));
+}
+
+function renderCalendarTab(){
+  const list = document.getElementById('mainList');
+  const days = [0,1,2,3,4,5,6].map(i => addDaysIso(_calWeekStart, i));
+  const dayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  list.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <button class="iconBtn" id="calPrevWeek">◀</button>
+      <button class="btnGhost" id="calToday" style="padding:6px 14px;">This week</button>
+      <button class="iconBtn" id="calNextWeek">▶</button>
+    </div>
+    <div id="calWeekStrip" style="display:flex;gap:6px;margin-bottom:16px;"></div>
+    <div id="calDayList"></div>
+  `;
+  const stripEl = list.querySelector('#calWeekStrip');
+  stripEl.innerHTML = days.map((iso, i) => {
+    const count = appointmentsOnDate(iso).length;
+    const isToday = iso === todayISO();
+    const isSelected = iso === _calSelectedDate;
+    return `
+      <button type="button" class="calDayChip ${isSelected?'selected':''} ${isToday?'today':''}" data-date="${iso}" style="flex:1;">
+        <div class="cdLabel">${dayNames[i]}</div>
+        <div class="cdNum">${Number(iso.slice(8,10))}</div>
+        ${count ? `<div class="cdDot"></div>` : ''}
+      </button>
+    `;
+  }).join('');
+  stripEl.querySelectorAll('.calDayChip').forEach(el => {
+    el.addEventListener('click', () => { _calSelectedDate = el.dataset.date; renderCalendarTab(); });
+  });
+  list.querySelector('#calPrevWeek').addEventListener('click', () => { _calWeekStart = addDaysIso(_calWeekStart, -7); renderCalendarTab(); });
+  list.querySelector('#calNextWeek').addEventListener('click', () => { _calWeekStart = addDaysIso(_calWeekStart, 7); renderCalendarTab(); });
+  list.querySelector('#calToday').addEventListener('click', () => { _calWeekStart = mondayOf(todayISO()); _calSelectedDate = todayISO(); renderCalendarTab(); });
+
+  const dayListEl = list.querySelector('#calDayList');
+  const appts = appointmentsOnDate(_calSelectedDate);
+  const dateLabel = new Date(_calSelectedDate+'T00:00:00').toLocaleDateString(undefined, { weekday:'long', day:'numeric', month:'long' });
+  dayListEl.innerHTML = `
+    <div style="font-size:15px;font-weight:600;margin-bottom:10px;">${escHtml(dateLabel)}</div>
+    ${!appts.length ? '<div class="emptyState" style="padding:30px 10px;"><div class="glyph">📅</div>No appointments this day.</div>' : appts.map(a => {
+      const client = (_env.data.clients||[]).find(c=>c.id===a.clientId);
+      return `
+        <div class="clientCard" data-id="${escHtml(a.id)}" style="margin-bottom:8px;">
+          <div><div class="cName">${escHtml(a.time||'')} — ${escHtml(client?client.name:'Unknown client')}</div><div class="cMeta">${a.durationMinutes||30} min${a.notes?' · '+escHtml(a.notes):''}</div></div>
+        </div>
+      `;
+    }).join('')}
+  `;
+  dayListEl.querySelectorAll('.clientCard').forEach(el => {
+    el.addEventListener('click', () => openAppointmentDetail(appts.find(a=>a.id===el.dataset.id)));
+  });
+}
+
+function openAppointmentSheet(date){
+  const clients = activeClients();
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>Book appointment</h2><button class="iconBtn" data-close>✕</button></div>
+      ${!clients.length ? '<div class="phasePlaceholder">Add a client first before booking appointments.</div>' : `
+      <div class="field"><label>Client</label>
+        <select id="apClient" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          ${clients.map(c => `<option value="${escHtml(c.id)}">${escHtml(c.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Date</label><input id="apDate" type="date" value="${escHtml(date)}"></div>
+      <div class="field"><label>Time</label><input id="apTime" type="time" value="09:00"></div>
+      <div class="field"><label>Duration (minutes)</label><input id="apDuration" type="number" min="15" step="15" value="30"></div>
+      <div class="field"><label>Notes (optional)</label><input id="apNotes" type="text" placeholder="e.g. First session, bring PAR-Q"></div>
+      <div class="rowActions"><button class="btnAmber" id="apSave">Book appointment</button></div>
+      `}
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  const saveBtn = backdrop.querySelector('#apSave');
+  if (saveBtn) saveBtn.addEventListener('click', () => {
+    const clientId = backdrop.querySelector('#apClient').value;
+    const date2 = backdrop.querySelector('#apDate').value;
+    const time = backdrop.querySelector('#apTime').value;
+    if (!clientId || !date2 || !time){ toast('Fill in client, date and time'); return; }
+    const now = new Date().toISOString();
+    const client = clients.find(c=>c.id===clientId);
+    const activeProg = activeProgrammeFor(clientId);
+
+    // Booking a slot creates the linked PT session record directly, ready
+    // for the trainer to fill in review notes after the meeting happens.
+    const session = {
+      id: uuid(), clientId, date: date2, programmeId: activeProg ? activeProg.id : null,
+      reviewNotes:'', progressionNotes:'', items:[], appointmentId:null,
+      createdAt: now, updatedAt: now
+    };
+    const appt = {
+      id: uuid(), clientId, date: date2, time,
+      durationMinutes: Number(backdrop.querySelector('#apDuration').value)||30,
+      notes: backdrop.querySelector('#apNotes').value.trim(),
+      sessionId: session.id,
+      createdAt: now, updatedAt: now
+    };
+    session.appointmentId = appt.id;
+
+    _env.data.appointments = _env.data.appointments || [];
+    _env.data.appointments.push(appt);
+    _env.data.sessions = _env.data.sessions || [];
+    _env.data.sessions.push(session);
+    persistAndSync('pt_appointments', 'appointments', appt);
+    persistAndSync('pt_sessions', 'sessions', session);
+
+    backdrop.remove();
+    _calSelectedDate = date2;
+    renderCalendarTab();
+    toast(`Booked with ${client ? client.name : 'client'} — session ready to review after`);
+  });
+}
+
+// Tapping an appointment opens the client's card straight to Sessions,
+// with the linked PT session for this appointment highlighted.
+function openAppointmentDetail(appt){
+  if (!appt) return;
+  const client = (_env.data.clients||[]).find(c=>c.id===appt.clientId);
+  if (!client){ toast('Client not found'); return; }
+  openClientSheet(client.id, 'sessions', appt.sessionId);
+}
+
+
 function sessionsFor(clientId){
   return (_env.data.sessions||[]).filter(s => !s._deleted && s.clientId === clientId)
     .sort((a,b) => new Date(b.date) - new Date(a.date));
 }
 
-function renderClientSessionsTab(body, client){
+function renderClientSessionsTab(body, client, highlightSessionId){
   const sessions = sessionsFor(client.id);
   body.innerHTML = `
-    <div class="rowActions" style="margin-bottom:14px;"><button class="btnAmber" id="csLogNew">+ Log session</button></div>
+    <div class="rowActions" style="margin-bottom:14px;"><button class="btnAmber" id="csLogNew">+ New PT session</button></div>
     <div id="csList"></div>
   `;
   const listEl = body.querySelector('#csList');
   if (!sessions.length){
-    listEl.innerHTML = '<div class="emptyState"><div class="glyph">📝</div>No sessions logged yet.</div>';
+    listEl.innerHTML = '<div class="emptyState"><div class="glyph">📝</div>No PT sessions yet.</div>';
   } else {
-    listEl.innerHTML = sessions.map(s => `
-      <div class="clientCard" data-id="${escHtml(s.id)}" style="margin-bottom:8px;">
-        <div><div class="cName">${escHtml(s.date)}</div><div class="cMeta">${s.items.length} exercise${s.items.length===1?'':'s'}${s.notes ? ' · '+escHtml(s.notes) : ''}</div></div>
-      </div>
-    `).join('');
+    listEl.innerHTML = sessions.map(s => {
+      const prog = allPrograms().find(p => p.id === s.programmeId);
+      const isHighlighted = s.id === highlightSessionId;
+      const reviewed = s.reviewNotes || s.progressionNotes;
+      return `
+        <div class="clientCard" data-id="${escHtml(s.id)}" style="margin-bottom:8px;${isHighlighted?'border-color:var(--amber);':''}">
+          <div>
+            <div class="cName">${escHtml(s.date)}${isHighlighted?' <span class="badge active" style="margin-left:4px;">This booking</span>':''}</div>
+            <div class="cMeta">${prog ? escHtml(prog.name) : 'No programme linked'}${s.items.length ? ' · '+s.items.length+' exercise'+(s.items.length===1?'':'s')+' logged' : ''}</div>
+          </div>
+          <span class="badge ${reviewed?'active':'archived'}">${reviewed?'Reviewed':'Awaiting review'}</span>
+        </div>
+      `;
+    }).join('');
     listEl.querySelectorAll('.clientCard').forEach(el => el.addEventListener('click', () => openSessionSheet(client, sessions.find(s=>s.id===el.dataset.id), body)));
   }
   body.querySelector('#csLogNew').addEventListener('click', () => openSessionSheet(client, null, body));
@@ -1288,24 +1464,37 @@ function renderClientSessionsTab(body, client){
 
 function openSessionSheet(client, existingSession, parentBody){
   const isNew = !existingSession;
+  const activeProg = activeProgrammeFor(client.id);
   const session = existingSession ? JSON.parse(JSON.stringify(existingSession)) : {
-    id: uuid(), clientId: client.id, date: new Date().toISOString().slice(0,10), notes:'', items:[],
+    id: uuid(), clientId: client.id, date: new Date().toISOString().slice(0,10),
+    programmeId: activeProg ? activeProg.id : null,
+    reviewNotes:'', progressionNotes:'', items:[], appointmentId:null,
     createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
   };
+  const linkedProgOptions = clientProgrammes(client.id);
   const backdrop = document.createElement('div');
   backdrop.className = 'sheetBackdrop';
   backdrop.innerHTML = `
     <div class="sheet">
       <div class="sheetHandle"></div>
-      <div class="sheetHeader"><h2>${isNew ? 'Log session' : 'Edit session'}</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="sheetHeader"><h2>${isNew ? 'New PT session' : 'PT session'}</h2><button class="iconBtn" data-close>✕</button></div>
       <div class="field"><label>Date</label><input id="ssDate" type="date" value="${escHtml(session.date)}"></div>
+      <div class="field"><label>Programme being reviewed</label>
+        <select id="ssProg" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;">
+          <option value="">None</option>
+          ${linkedProgOptions.map(p => `<option value="${escHtml(p.id)}" ${session.programmeId===p.id?'selected':''}>${escHtml(p.name)}${p.status==='archived'?' (archived)':''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>How's it gone since last time? (adherence, wins, issues)</label><textarea id="ssReview" class="notesArea" placeholder="e.g. Hit all sessions, squat feeling strong, shoulder niggle on overhead press">${escHtml(session.reviewNotes)}</textarea></div>
+      <div class="field"><label>Progression &amp; what's next (exercises to push, ease off, or add for next programme)</label><textarea id="ssProgression" class="notesArea" placeholder="e.g. Bump squat to 70kg, swap overhead press for landmine press, add core work">${escHtml(session.progressionNotes)}</textarea></div>
+      <div class="field"><label>Logged performance this session (optional)</label></div>
       <div id="ssItemList"></div>
-      <div class="rowActions"><button class="btnGhost" id="ssAddItem">+ Log exercise</button></div>
-      <div class="field"><label>Session notes (optional)</label><textarea id="ssNotes" class="notesArea">${escHtml(session.notes)}</textarea></div>
+      <div class="rowActions"><button class="btnGhost" id="ssAddItem">+ Log exercise performance</button></div>
       <div class="rowActions">
         ${!isNew ? '<button class="btnGhost btnDanger" id="ssDelete">Delete</button>' : ''}
         <button class="btnAmber" id="ssSave">${isNew ? 'Save session' : 'Save'}</button>
       </div>
+      ${session.programmeId ? '<div class="rowActions"><button class="btnGhost" id="ssNewProg">Create next programme from this review</button></div>' : ''}
     </div>
   `;
   document.body.appendChild(backdrop);
@@ -1323,20 +1512,27 @@ function openSessionSheet(client, existingSession, parentBody){
     openSessionItemSheet(null, client, (item) => { session.items.push(item); refreshItems(); });
   });
 
-  backdrop.querySelector('#ssSave').addEventListener('click', () => {
+  function persist(){
     const date = backdrop.querySelector('#ssDate').value;
-    if (!date){ toast('Pick a date'); return; }
+    if (!date){ toast('Pick a date'); return false; }
     session.date = date;
-    session.notes = backdrop.querySelector('#ssNotes').value;
+    session.programmeId = backdrop.querySelector('#ssProg').value || null;
+    session.reviewNotes = backdrop.querySelector('#ssReview').value;
+    session.progressionNotes = backdrop.querySelector('#ssProgression').value;
     session.updatedAt = new Date().toISOString();
     if (isNew){
       _env.data.sessions = _env.data.sessions || [];
       _env.data.sessions.push(session);
     }
     persistAndSync('pt_sessions', 'sessions', session);
+    return true;
+  }
+
+  backdrop.querySelector('#ssSave').addEventListener('click', () => {
+    if (!persist()) return;
     backdrop.remove();
     renderClientSessionsTab(parentBody, client);
-    toast(isNew ? 'Session logged' : 'Saved');
+    toast(isNew ? 'Session saved' : 'Saved');
   });
   const delBtn = backdrop.querySelector('#ssDelete');
   if (delBtn) delBtn.addEventListener('click', () => {
@@ -1346,6 +1542,29 @@ function openSessionSheet(client, existingSession, parentBody){
     backdrop.remove();
     renderClientSessionsTab(parentBody, client);
     toast('Session deleted');
+  });
+  const newProgBtn = backdrop.querySelector('#ssNewProg');
+  if (newProgBtn) newProgBtn.addEventListener('click', () => {
+    const sourceProg = allPrograms().find(p => p.id === session.programmeId);
+    if (!sourceProg){ toast('Programme not found'); return; }
+    if (!persist()) return;
+    // Duplicate the reviewed programme as the client's new active one —
+    // the natural next step after deciding how to progress it.
+    if (sourceProg.status === 'active'){
+      sourceProg.status = 'archived'; sourceProg.updatedAt = new Date().toISOString();
+      persistAndSync('pt_programs', 'programs', sourceProg);
+    }
+    const nextProg = {
+      id: uuid(), kind:'client', clientId: client.id, name: sourceProg.name, notes: sourceProg.notes||'',
+      status:'active', items: sourceProg.items.map(it => Object.assign({}, it, { itemId: uuid(), targetSets: (it.targetSets||[]).map(s=>Object.assign({},s)) })),
+      createdAt:new Date().toISOString(), updatedAt:new Date().toISOString()
+    };
+    _env.data.programs = _env.data.programs || [];
+    _env.data.programs.push(nextProg);
+    persistAndSync('pt_programs', 'programs', nextProg);
+    backdrop.remove();
+    toast('New programme created from this review — edit it in the Programme tab');
+    renderClientSessionsTab(parentBody, client);
   });
 }
 
@@ -1663,6 +1882,22 @@ function migrateLegacyProgramItems(programs){
       }
       delete item.sets; delete item.reps; delete item.weight;
     });
+  });
+}
+
+// One-time, non-destructive migration for sessions created in v2.4, which
+// were a freeform workout log (date, single notes field, items) rather
+// than a PT review (reviewNotes, progressionNotes, linked programme).
+// The old free-text `notes` maps to reviewNotes as the closest match;
+// nothing is discarded.
+function migrateLegacySessions(sessions){
+  (sessions||[]).forEach(s => {
+    if ('reviewNotes' in s) return; // already v2.5+
+    s.reviewNotes = s.notes || '';
+    s.progressionNotes = '';
+    s.programmeId = s.programmeId || null;
+    s.appointmentId = s.appointmentId || null;
+    delete s.notes;
   });
 }
 
