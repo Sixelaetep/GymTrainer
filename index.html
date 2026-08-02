@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.14</title>
-<!-- PT Companion — version 2.14 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.15</title>
+<!-- PT Companion — version 2.15 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -317,13 +317,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase, but you set and reset your own password — there's no sign-up screen, just "Forgot password?" above.</div>
-  <div class="loginVersion" id="loginVersion">v2.14</div>
+  <div class="loginVersion" id="loginVersion">v2.15</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.14</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.15</span></h1>
     <div style="display:flex;align-items:center;gap:8px;">
       <button id="trainerBtn" title="Your trainer details">🧑‍🏫</button>
       <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
@@ -356,7 +356,17 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.14';
+const VERSION = '2.15';
+// v2.15 (GYM-056 parity): Distance-type target/actual sets no longer
+// treat time as mandatory alongside metres — matching the Gym Tracker
+// v2.61 change these two apps share programme data with. Distance
+// (metres) is the primary/mandatory field; the min:sec time is optional.
+// New distance sets default to seconds:0 (was 300) so the field starts
+// genuinely unset. itemSummary() and bestSetValue()/formatBestValue()
+// now omit the "in mm:ss" portion when no time was logged, instead of
+// showing a misleading "in 0s". No schema change — this only affects
+// display and defaults, so existing programme/session data (with or
+// without a logged time) reads correctly either way.
 // v2.14 (PT-006, PT-005): Programme tab is list-first now — every
 // programme for a client shows up front (active first, then most recent),
 // each with an explicit "Set active" toggle and an Open into the same
@@ -1498,7 +1508,9 @@ function itemSummary(item, setsKey){
     return `${n} set${n===1?'':'s'} · ${sets.map(s=>fmtMinSec(s.seconds)).join(', ')}`;
   }
   if (item.trackType === 'distance'){
-    return `${n} set${n===1?'':'s'} · ${sets.map(s=>`${s.metres||0}m in ${fmtMinSec(s.seconds)}`).join(', ')}`;
+    // GYM-056 parity: time is optional for distance sets now — omit
+    // "in mm:ss" entirely when no time was logged.
+    return `${n} set${n===1?'':'s'} · ${sets.map(s=>s.seconds?`${s.metres||0}m in ${fmtMinSec(s.seconds)}`:`${s.metres||0}m`).join(', ')}`;
   }
   return `${n} set${n===1?'':'s'} · ${sets.map(s=>`${s.reps||0}${s.weight?'×'+s.weight+'kg':''}`).join(', ')}`;
 }
@@ -1529,7 +1541,9 @@ function renderItemList(container, items, onEdit, onRemove, setsKey){
 }
 
 function defaultSetForType(type){
-  return type==='distance' ? {metres:1000, seconds:300, weight:0} : type==='time' ? {seconds:30} : {reps:10, weight:0};
+  // GYM-056 parity: time unset by default for distance — metres is the
+  // mandatory/primary field, time is optional.
+  return type==='distance' ? {metres:1000, seconds:0, weight:0} : type==='time' ? {seconds:30} : {reps:10, weight:0};
 }
 
 // Shared exercise search+pick UI (search box, tappable pill results, quick-
@@ -1583,8 +1597,8 @@ function renderSetBuilder(zone, sets, trackType, setsLabel){
       return `<div class="setRow" data-si="${si}">
         <span class="setIdx">${si+1}</span>
         <input type="number" min="0" placeholder="metres" value="${s.metres||''}" data-f="metres">
-        <input type="number" min="0" placeholder="min" style="max-width:64px" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
-        <input type="number" min="0" max="59" placeholder="sec" style="max-width:64px" value="${(s.seconds||0)%60}" data-f="sec">
+        <input type="number" min="0" placeholder="min (opt)" style="max-width:64px" value="${Math.floor((s.seconds||0)/60)}" data-f="min">
+        <input type="number" min="0" max="59" placeholder="sec (opt)" style="max-width:64px" value="${(s.seconds||0)%60}" data-f="sec">
         <input type="number" min="0" step="0.5" placeholder="kg (opt)" value="${s.weight||''}" data-f="weight">
         <button type="button" class="iconBtn" data-remove="${si}">✕</button>
       </div>`;
