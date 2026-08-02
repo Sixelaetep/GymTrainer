@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.15</title>
-<!-- PT Companion — version 2.15 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.16</title>
+<!-- PT Companion — version 2.16 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -317,13 +317,13 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase, but you set and reset your own password — there's no sign-up screen, just "Forgot password?" above.</div>
-  <div class="loginVersion" id="loginVersion">v2.15</div>
+  <div class="loginVersion" id="loginVersion">v2.16</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.15</span></h1>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.16</span></h1>
     <div style="display:flex;align-items:center;gap:8px;">
       <button id="trainerBtn" title="Your trainer details">🧑‍🏫</button>
       <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
@@ -356,7 +356,15 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.15';
+const VERSION = '2.16';
+// v2.16 (PT-007): User Guide PDF is now linked from inside the app —
+// Data & Backup > Help > "📄 User Guide" opens pt-companion-user-guide.pdf,
+// which must sit in the same folder as this file when deployed (a plain
+// relative link, no hosting path hardcoded). Browsers render PDFs inline
+// by default, so this opens as a view in a new tab; the person uses their
+// browser's own save/download control for a copy. The filename is fixed
+// (not versioned) — updating the guide means re-uploading over the same
+// file, not editing this link.
 // v2.15 (GYM-056 parity): Distance-type target/actual sets no longer
 // treat time as mandatory alongside metres — matching the Gym Tracker
 // v2.61 change these two apps share programme data with. Distance
@@ -1195,6 +1203,12 @@ function openDataBackupModal(){
       <div class="drawerRow"><span>Status</span><span id="dbStatus"></span></div>
       <div class="drawerRow"><span>Pending changes</span><span>${_retryQueue.length}</span></div>
       <div class="rowActions"><button class="btnAmber" id="dbSyncNow" style="width:100%;">Sync now</button></div>
+
+      <h3 style="font-size:15px;margin:22px 0 10px;">Help</h3>
+      <div class="rowActions">
+        <a class="btnGhost" href="pt-companion-user-guide.pdf" target="_blank" rel="noopener" style="width:100%;text-align:center;text-decoration:none;display:block;">📄 User Guide</a>
+      </div>
+      <div class="cMeta" style="margin-top:-6px;">Opens in a new tab — use your browser's save/download option to keep a copy.</div>
 
       <h3 style="font-size:15px;margin:22px 0 10px;">Full backup</h3>
       <div class="rowActions">
