@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
-<title>PT Companion v2.13</title>
-<!-- PT Companion — version 2.13 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
+<title>PT Companion v2.14</title>
+<!-- PT Companion — version 2.14 — bump this comment + <title> + loginVersion + topBarVersion + VERSION const together on every release -->
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.json">
@@ -121,6 +121,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 #syncBtn{
   display:flex;align-items:center;background:transparent;border:1px solid var(--line);
   color:var(--chalk-dim);font-size:12px;border-radius:20px;padding:6px 12px;
+}
+#trainerBtn{
+  display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid var(--line);
+  color:var(--chalk-dim);font-size:15px;border-radius:20px;width:32px;height:32px;padding:0;
 }
 
 #mainArea{flex:1;padding:16px;padding-bottom:calc(150px + env(safe-area-inset-bottom));max-width:640px;width:100%;margin:0 auto;}
@@ -313,14 +317,17 @@ textarea.notesArea{
     <div class="loginError" id="loginError"></div>
   </div>
   <div class="loginHint">Accounts are created by your admin in Supabase, but you set and reset your own password — there's no sign-up screen, just "Forgot password?" above.</div>
-  <div class="loginVersion" id="loginVersion">v2.13</div>
+  <div class="loginVersion" id="loginVersion">v2.14</div>
 </div>
 
 <!-- ============ APP SHELL ============ -->
 <div id="appShell" class="hidden">
   <div id="topBar">
-    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.13</span></h1>
-    <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
+    <h1>PT Companion <span class="topBarVersion" id="topBarVersion">v2.14</span></h1>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button id="trainerBtn" title="Your trainer details">🧑‍🏫</button>
+      <button id="syncBtn"><span class="syncDot" id="syncDot"></span><span id="syncLabel">Sync</span></button>
+    </div>
   </div>
 
   <div id="mainArea">
@@ -349,7 +356,24 @@ textarea.notesArea{
    Phase 1: auth, client roster, robust sync engine, PWA shell.
    Phase 2+: programmes, PDF export, session logging, insights.
    ========================================================================= */
-const VERSION = '2.13';
+const VERSION = '2.14';
+// v2.14 (PT-006, PT-005): Programme tab is list-first now — every
+// programme for a client shows up front (active first, then most recent),
+// each with an explicit "Set active" toggle and an Open into the same
+// detail/edit view regardless of active/archived status. That detail view
+// is the old active-only editor, generalised (renderProgrammeDetail()) so
+// any programme can be edited, have plans added/removed, or be exported —
+// not just the active one. Creating a programme still auto-archives
+// whatever was previously active (unchanged), but now that can also be
+// done manually from any programme via "Set as active", which archives
+// whichever other programme currently holds that status for the client.
+// Also adds a "Your details" sheet (🧑‍🏫 in the top bar) for the trainer's
+// own name/business/contact — stored as a single _env.data.trainerProfile
+// object (not a per-record synced array, so it isn't yet pushed to its own
+// Supabase table, but it does round-trip in full JSON backups). Trainer
+// details and programme notes now appear on PDF exports (redesigned with
+// a header banner using the app's own icon), and are passed through as
+// extra, harmless fields on Gym Tracker JSON exports.
 // v2.13 (PT-004): Programme PDF export and Gym Tracker JSON export, both
 // available from the active programme card and from every entry in a
 // client's archived-programme history (trainer picks any programme, not
@@ -555,7 +579,7 @@ async function sbFetch(path, options={}){
 // Backwards-compatible: a v1.6 backup with only `clients` still loads fine —
 // exercises/programs default to empty arrays rather than failing.
 function defaultEnv(){
-  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [], sessions: [], appointments: [] } };
+  return { version: 1, lastUpdated: new Date().toISOString(), lastExported: null, data: { clients: [], exercises: [], programs: [], tags: [], sessions: [], appointments: [], trainerProfile: { name:'', businessName:'', email:'', phone:'' } } };
 }
 // No user is known yet at page load — start empty. loadEnvForUser() runs
 // once a login succeeds (see onAuthed), replacing this with that user's
@@ -572,6 +596,11 @@ function normalizeEnvShape(parsed){
   parsed.data.tags      = Array.isArray(parsed.data.tags)      ? parsed.data.tags      : [];
   parsed.data.sessions  = Array.isArray(parsed.data.sessions)  ? parsed.data.sessions  : [];
   parsed.data.appointments = Array.isArray(parsed.data.appointments) ? parsed.data.appointments : [];
+  // PT-005: single settings object, not a per-record array — absent in any
+  // pre-v2.14 backup, so default it rather than fail.
+  parsed.data.trainerProfile = (parsed.data.trainerProfile && typeof parsed.data.trainerProfile === 'object')
+    ? { name: parsed.data.trainerProfile.name||'', businessName: parsed.data.trainerProfile.businessName||'', email: parsed.data.trainerProfile.email||'', phone: parsed.data.trainerProfile.phone||'' }
+    : { name:'', businessName:'', email:'', phone:'' };
   migrateLegacySessions(parsed.data.sessions);
   migrateLegacyClients(parsed.data.clients);
   migrateLegacyExercises(parsed.data.exercises);
@@ -898,6 +927,44 @@ function persistAndSync(table, localArrKey, record){
 }
 
 document.getElementById('syncBtn').addEventListener('click', openDataBackupModal);
+document.getElementById('trainerBtn').addEventListener('click', openTrainerProfileSheet);
+
+// PT-005: trainer's own details (name/business/contact), stored as a single
+// settings object in _env.data.trainerProfile — not a per-record synced
+// array like clients/exercises/programs, so it round-trips in JSON backups
+// but isn't (yet) pushed to its own Supabase table. Used to personalise
+// PDF and Gym Tracker exports.
+function openTrainerProfileSheet(){
+  const p = _env.data.trainerProfile || { name:'', businessName:'', email:'', phone:'' };
+  const backdrop = document.createElement('div');
+  backdrop.className = 'sheetBackdrop';
+  backdrop.innerHTML = `
+    <div class="sheet">
+      <div class="sheetHandle"></div>
+      <div class="sheetHeader"><h2>Your details</h2><button class="iconBtn" data-close>✕</button></div>
+      <div class="phasePlaceholder" style="margin-bottom:14px;">Shown on exported PDFs and passed through to Gym Tracker imports.</div>
+      <div class="field"><label>Your name</label><input id="tpName" type="text" value="${escHtml(p.name)}" placeholder="e.g. Alex Morgan"></div>
+      <div class="field"><label>Business name <span style="text-transform:none;font-weight:400;color:var(--chalk-dim)">(optional)</span></label><input id="tpBusiness" type="text" value="${escHtml(p.businessName)}" placeholder="e.g. Morgan Performance Training"></div>
+      <div class="field"><label>Email <span style="text-transform:none;font-weight:400;color:var(--chalk-dim)">(optional)</span></label><input id="tpEmail" type="email" value="${escHtml(p.email)}"></div>
+      <div class="field"><label>Phone <span style="text-transform:none;font-weight:400;color:var(--chalk-dim)">(optional)</span></label><input id="tpPhone" type="tel" value="${escHtml(p.phone)}"></div>
+      <div class="rowActions"><button class="btnAmber" id="tpSave">Save</button></div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', e => { if (e.target===backdrop) backdrop.remove(); });
+  backdrop.querySelector('[data-close]').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('#tpSave').addEventListener('click', () => {
+    _env.data.trainerProfile = {
+      name: backdrop.querySelector('#tpName').value.trim(),
+      businessName: backdrop.querySelector('#tpBusiness').value.trim(),
+      email: backdrop.querySelector('#tpEmail').value.trim(),
+      phone: backdrop.querySelector('#tpPhone').value.trim()
+    };
+    save(_env);
+    backdrop.remove();
+    toast('Saved');
+  });
+}
 
 function renderSyncStatus(){
   const dot = document.getElementById('syncDot');
@@ -1049,6 +1116,9 @@ function restoreFullBackup(parsed){
   _env.data.tags = bump(data.tags);
   _env.data.sessions = bump(data.sessions);
   _env.data.appointments = bump(data.appointments);
+  _env.data.trainerProfile = (data.trainerProfile && typeof data.trainerProfile === 'object')
+    ? { name: data.trainerProfile.name||'', businessName: data.trainerProfile.businessName||'', email: data.trainerProfile.email||'', phone: data.trainerProfile.phone||'' }
+    : { name:'', businessName:'', email:'', phone:'' };
 
   migrateLegacyClients(_env.data.clients);
   migrateLegacyExercises(_env.data.exercises);
@@ -1398,6 +1468,21 @@ function allPrograms(){ return _env.data.programs || []; }
 function templates(){ return allPrograms().filter(p => !p._deleted && p.kind === 'plan'); }
 function clientProgrammes(clientId){ return allPrograms().filter(p => !p._deleted && p.kind==='programme' && p.clientId===clientId); }
 function activeProgrammeFor(clientId){ return clientProgrammes(clientId).find(p => p.status === 'active'); }
+// PT-006: explicit toggle, usable from the programme list or from inside a
+// programme's own detail view — archives whatever else is currently active
+// for this client (there's still only ever one active programme at a time;
+// that invariant is unchanged, just user-driven now instead of only
+// happening automatically on creation).
+function setActiveProgramme(client, programmeId){
+  const now = new Date().toISOString();
+  clientProgrammes(client.id).forEach(p => {
+    if (p.id === programmeId && p.status !== 'active'){
+      p.status = 'active'; p.updatedAt = now; persistAndSync('pt_programs','programs',p);
+    } else if (p.id !== programmeId && p.status === 'active'){
+      p.status = 'archived'; p.updatedAt = now; persistAndSync('pt_programs','programs',p);
+    }
+  });
+}
 
 function fmtMinSec(seconds){
   seconds = Number(seconds)||0;
@@ -1755,24 +1840,53 @@ function exportProgrammeForGymTracker(programme, client){
     notes: pl.notes||'',
     items: (pl.items||[]).map(it => ({ exerciseName: it.exerciseName, trackType: it.trackType, targetSets: (it.targetSets||[]).map(s=>Object.assign({},s)) }))
   }));
-  const bundle = { schemaVersion: 1, type: "programImport", programName: programme.name, exercises, plans };
+  // PT-005: trainer details and programme notes are extra fields Gym
+  // Tracker's importProgramFileHandler() simply ignores (it only reads
+  // schemaVersion/type/programName/exercises/plans) — harmless to include,
+  // useful for anyone reading the raw file, and free if Gym Tracker ever
+  // wants to surface them later.
+  const tp = _env.data.trainerProfile || {};
+  const bundle = {
+    schemaVersion: 1, type: "programImport", programName: programme.name,
+    programNotes: programme.notes || '',
+    trainerName: tp.name || '', trainerBusiness: tp.businessName || '',
+    exercises, plans
+  };
   const safeName = (n) => (n||'export').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
   downloadJSON(`gym-tracker-import-${safeName(client && client.name)}-${safeName(programme.name)}.json`, bundle);
   toast('Gym Tracker import file downloaded');
 }
 
-// PT-004: printable programme summary. Reuses the reserved print CSS
-// (@media print block, "Phase 3" comment near the top of <style>) — fills
-// the hidden #pdfPrintArea, prints, then clears it so it never shows on
-// screen. window.print() (save-as-PDF from the browser dialog) rather than
-// a PDF library, per the brief.
+// PT-004/PT-005: printable programme summary. Reuses the reserved print CSS
+// (@media print block near the top of <style>) — fills the hidden
+// #pdfPrintArea, prints, then clears it so it never shows on screen.
+// window.print() (save-as-PDF from the browser dialog) rather than a PDF
+// library, per the brief. PT-005 adds a proper header banner (app icon +
+// trainer's own details, if they've filled in the Your Details sheet) so
+// this reads as a professional handout rather than a plain data dump.
 function exportProgrammePDF(programme, client){
   const area = document.getElementById('pdfPrintArea');
+  const tp = _env.data.trainerProfile || {};
   const weeksLabel = programme.durationWeeks ? `${programme.durationWeeks} week${programme.durationWeeks===1?'':'s'}` : '';
+  const trainerLine = [tp.businessName, tp.name].filter(Boolean).join(' · ');
+  const trainerContact = [tp.email, tp.phone].filter(Boolean).join(' · ');
   area.innerHTML = `
+    <div style="display:flex;align-items:center;gap:14px;border-bottom:3px solid #E8A33D;padding-bottom:14px;margin-bottom:18px;">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:38px;height:38px;flex-shrink:0;">
+        <rect x="2" y="10.5" width="20" height="3" rx="1.5" fill="#E8A33D"/>
+        <rect x="0" y="7" width="4" height="10" rx="2" fill="#E8A33D"/>
+        <rect x="20" y="7" width="4" height="10" rx="2" fill="#E8A33D"/>
+        <rect x="1" y="9" width="2" height="6" rx="1" fill="#333"/>
+        <rect x="21" y="9" width="2" height="6" rx="1" fill="#333"/>
+      </svg>
+      <div>
+        ${trainerLine ? `<div style="font-weight:700;font-size:15px;">${escHtml(trainerLine)}</div>` : `<div style="font-weight:700;font-size:15px;">PT Companion</div>`}
+        ${trainerContact ? `<div style="font-size:12px;color:#555;">${escHtml(trainerContact)}</div>` : ''}
+      </div>
+    </div>
     <h1 style="margin:0 0 4px;">${escHtml(programme.name)}</h1>
     <div style="margin-bottom:14px;color:#444;">${escHtml(client ? client.name : '')}${weeksLabel?' · '+escHtml(weeksLabel):''}${programme.startDate?' · Starts '+escHtml(programme.startDate):''}</div>
-    ${programme.notes ? `<div style="margin-bottom:16px;">${escHtml(programme.notes)}</div>` : ''}
+    ${programme.notes ? `<div style="margin-bottom:16px;padding:10px 12px;background:#f4f4f4;border-radius:8px;">${escHtml(programme.notes)}</div>` : ''}
     ${(programme.plans||[]).map(pl => `
       <h2 style="margin:18px 0 6px;font-size:16px;">${escHtml(pl.name)}</h2>
       ${pl.notes ? `<div style="margin-bottom:6px;color:#444;">${escHtml(pl.notes)}</div>` : ''}
@@ -1790,125 +1904,158 @@ function exportProgrammePDF(programme, client){
   window.print();
 }
 
+// PT-006: list-first Programme tab. Every programme for this client is
+// shown (active first, then most-recently-updated), with a "Set active"
+// toggle right on the card and an "Open" to edit any of them — active or
+// archived — via renderProgrammeDetail(). Creating the first programme
+// (or any subsequent one) still works exactly as before via
+// openNewProgrammeSheet(); the single-active-per-client rule is unchanged,
+// just user-toggleable now instead of only happening automatically.
 function renderClientProgrammeTab(body, client){
-  const active = activeProgrammeFor(client.id);
-  const history = clientProgrammes(client.id).filter(p => p.status === 'archived')
-    .sort((a,b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  const all = clientProgrammes(client.id).sort((a,b) => {
+    if ((a.status==='active') !== (b.status==='active')) return a.status==='active' ? -1 : 1;
+    return new Date(b.updatedAt) - new Date(a.updatedAt);
+  });
 
-  if (!active){
+  if (!all.length){
     body.innerHTML = `
-      <div class="phasePlaceholder">This client has no active programme yet. A programme runs for an agreed period and can hold several plans — e.g. a gym day each, plus a general/daily one.</div>
+      <div class="phasePlaceholder">This client has no programmes yet. A programme runs for an agreed period and can hold several plans — e.g. a gym day each, plus a general/daily one.</div>
       <div class="rowActions"><button class="btnAmber" id="pfNewProg">New programme</button></div>
-      ${history.length ? `<h3 style="font-size:15px;margin:20px 0 10px;">History</h3><div id="pfHistory"></div>` : ''}
     `;
-  } else {
-    const weeksLabel = active.durationWeeks ? `${active.durationWeeks} week${active.durationWeeks===1?'':'s'}` : 'No duration set';
-    body.innerHTML = `
-      <div class="statRow">
-        <div class="stat"><div class="num">${(active.plans||[]).length}</div><div class="lbl">Plans</div></div>
-        <div class="stat"><div class="num">${planItemCount(active)}</div><div class="lbl">Exercises total</div></div>
-      </div>
-      <div class="field"><label>Programme name</label><input id="pfName" type="text" value="${escHtml(active.name)}"></div>
-      <div class="field" style="display:flex;gap:10px;">
-        <div style="flex:1;"><label style="display:block;font-size:12px;color:var(--chalk-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">Start date</label><input id="pfStart" type="date" value="${escHtml(active.startDate||'')}" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;"></div>
-        <div style="flex:1;"><label style="display:block;font-size:12px;color:var(--chalk-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">Duration (weeks)</label><input id="pfWeeks" type="number" min="1" value="${active.durationWeeks||''}" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;"></div>
-      </div>
-      <div class="field"><label>Programme notes</label><textarea id="pfNotes" class="notesArea">${escHtml(active.notes)}</textarea></div>
-      <div class="field"><label>Plans</label><div id="pfPlanList"></div></div>
-      <div class="rowActions"><button class="btnGhost" id="pfAddPlan">+ Add plan</button></div>
-      <div class="rowActions">
-        <button class="btnGhost" id="pfExportPdf">📄 Export PDF</button>
-        <button class="btnGhost" id="pfExportGym">⬇ Export for Gym Tracker</button>
-      </div>
-      <div class="rowActions">
-        <button class="btnGhost btnDanger" id="pfArchive">Archive programme</button>
-        <button class="btnAmber" id="pfSave">Save</button>
-      </div>
-      ${history.length ? `<h3 style="font-size:15px;margin:20px 0 10px;">History</h3><div id="pfHistory"></div>` : ''}
-    `;
-    const planListEl = body.querySelector('#pfPlanList');
-    function refreshPlans(){
-      const plans = active.plans || [];
-      if (!plans.length){
-        planListEl.innerHTML = '<div class="emptyState" style="padding:20px 10px;">No plans yet — add one below.</div>';
-        return;
-      }
-      planListEl.innerHTML = plans.map((pl, idx) => `
-        <div class="clientCard" data-idx="${idx}" style="margin-bottom:8px;">
-          <div><div class="cName">${escHtml(pl.name)}</div><div class="cMeta">${(pl.items||[]).length} exercise${(pl.items||[]).length===1?'':'s'}</div></div>
-          <button class="iconBtn" data-removeplan="${idx}" title="Remove plan">✕</button>
-        </div>
-      `).join('');
-      planListEl.querySelectorAll('.clientCard').forEach(el => {
-        el.addEventListener('click', e => {
-          if (e.target.closest('[data-removeplan]')) return;
-          openProgrammePlanSheet(active, Number(el.dataset.idx), body, client);
-        });
-      });
-      planListEl.querySelectorAll('[data-removeplan]').forEach(btn => {
-        btn.addEventListener('click', e => {
-          e.stopPropagation();
-          if (!confirm(`Remove "${plans[Number(btn.dataset.removeplan)].name}" from this programme?`)) return;
-          plans.splice(Number(btn.dataset.removeplan), 1);
-          active.updatedAt = new Date().toISOString();
-          persistAndSync('pt_programs','programs',active);
-          refreshPlans();
-          renderClientProgrammeTab(body, client);
-        });
-      });
-    }
-    refreshPlans();
+    body.querySelector('#pfNewProg').addEventListener('click', () => openNewProgrammeSheet(client, body));
+    return;
+  }
 
-    body.querySelector('#pfAddPlan').addEventListener('click', () => openAddPlanPicker(active, () => { renderClientProgrammeTab(body, client); }));
-    body.querySelector('#pfSave').addEventListener('click', () => {
-      const name = body.querySelector('#pfName').value.trim();
-      if (!name){ toast('Name is required'); return; }
-      active.name = name;
-      active.startDate = body.querySelector('#pfStart').value || active.startDate;
-      active.durationWeeks = body.querySelector('#pfWeeks').value ? Number(body.querySelector('#pfWeeks').value) : null;
-      active.notes = body.querySelector('#pfNotes').value;
-      active.updatedAt = new Date().toISOString();
-      persistAndSync('pt_programs','programs',active);
-      toast('Saved');
+  body.innerHTML = `
+    <div class="rowActions"><button class="btnAmber" id="pfNewProg">+ New programme</button></div>
+    <div id="pfProgList"></div>
+  `;
+  body.querySelector('#pfNewProg').addEventListener('click', () => openNewProgrammeSheet(client, body));
+
+  const listEl = body.querySelector('#pfProgList');
+  listEl.innerHTML = all.map((p, idx) => `
+    <div class="clientCard" data-idx="${idx}" style="margin-bottom:8px;flex-direction:column;align-items:stretch;cursor:pointer;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        <div>
+          <div class="cName">${escHtml(p.name)} <span class="badge ${p.status==='archived'?'archived':'active'}">${p.status==='archived'?'Archived':'Active'}</span></div>
+          <div class="cMeta">${(p.plans||[]).length} plan${(p.plans||[]).length===1?'':'s'} · ${planItemCount(p)} exercise${planItemCount(p)===1?'':'s'}</div>
+        </div>
+      </div>
+      ${p.status!=='active' ? `<div class="rowActions" style="margin-top:8px;"><button class="btnGhost" data-activate="${idx}">★ Set active</button></div>` : ''}
+    </div>
+  `).join('');
+  listEl.querySelectorAll('.clientCard').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('[data-activate]')) return;
+      renderProgrammeDetail(body, client, all[Number(el.dataset.idx)].id);
     });
-    body.querySelector('#pfArchive').addEventListener('click', () => {
-      if (!confirm(`Archive "${active.name}"? You can still view it in history.`)) return;
-      active.status = 'archived'; active.updatedAt = new Date().toISOString();
-      persistAndSync('pt_programs','programs',active);
+  });
+  listEl.querySelectorAll('[data-activate]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      setActiveProgramme(client, all[Number(btn.dataset.activate)].id);
       renderClientProgrammeTab(body, client);
-      toast('Programme archived');
+      toast('Set as active programme');
     });
-    body.querySelector('#pfExportPdf').addEventListener('click', () => exportProgrammePDF(active, client));
-    body.querySelector('#pfExportGym').addEventListener('click', () => exportProgrammeForGymTracker(active, client));
-  }
+  });
+}
 
-  const newProgBtn = body.querySelector('#pfNewProg');
-  if (newProgBtn) newProgBtn.addEventListener('click', () => openNewProgrammeSheet(client, body));
+// PT-006: detail/edit view for ANY single programme (active or archived) —
+// generalised from what used to be the active-only inline editor. Includes
+// a Back link, plan management, exports, Save, and a status action that's
+// either "Archive" (if this one is active) or "Set as active" (if not).
+function renderProgrammeDetail(body, client, programmeId){
+  const programme = clientProgrammes(client.id).find(p => p.id === programmeId);
+  if (!programme){ toast('That programme no longer exists'); renderClientProgrammeTab(body, client); return; }
 
-  const histEl = body.querySelector('#pfHistory');
-  if (histEl){
-    histEl.innerHTML = history.map((p, hIdx) => `
-      <details style="margin-bottom:8px;background:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;">
-        <summary style="cursor:pointer;font-weight:600;font-size:14px;">${escHtml(p.name)} <span style="color:var(--chalk-dim);font-weight:400;font-size:12px;">(${(p.plans||[]).length} plans, ${planItemCount(p)} exercises)</span></summary>
-        <div style="margin-top:8px;">${(p.plans||[]).map(pl => `
-          <div style="margin-bottom:8px;">
-            <div class="cMeta" style="font-weight:600;color:var(--chalk);">${escHtml(pl.name)}</div>
-            ${(pl.items||[]).map(it => `<div class="cMeta" style="margin-left:8px;">${escHtml(it.exerciseName)} — ${escHtml(itemSummary(it))}</div>`).join('') || '<div class="cMeta" style="margin-left:8px;">No exercises</div>'}
-          </div>
-        `).join('') || '<div class="cMeta">No plans</div>'}</div>
-        <div class="rowActions" style="margin-top:10px;">
-          <button class="btnGhost" data-histpdf="${hIdx}">📄 Export PDF</button>
-          <button class="btnGhost" data-histgym="${hIdx}">⬇ Export for Gym Tracker</button>
-        </div>
-      </details>
+  body.innerHTML = `
+    <button class="btnGhost" id="pfBack" style="margin-bottom:14px;">‹ All programmes</button>
+    <div class="statRow">
+      <div class="stat"><div class="num">${(programme.plans||[]).length}</div><div class="lbl">Plans</div></div>
+      <div class="stat"><div class="num">${planItemCount(programme)}</div><div class="lbl">Exercises total</div></div>
+    </div>
+    <div class="field"><label>Programme name</label><input id="pfName" type="text" value="${escHtml(programme.name)}"></div>
+    <div class="field" style="display:flex;gap:10px;">
+      <div style="flex:1;"><label style="display:block;font-size:12px;color:var(--chalk-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">Start date</label><input id="pfStart" type="date" value="${escHtml(programme.startDate||'')}" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;"></div>
+      <div style="flex:1;"><label style="display:block;font-size:12px;color:var(--chalk-dim);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em;">Duration (weeks)</label><input id="pfWeeks" type="number" min="1" value="${programme.durationWeeks||''}" style="width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:var(--ink);color:var(--chalk);font-size:16px;"></div>
+    </div>
+    <div class="field"><label>Programme notes</label><textarea id="pfNotes" class="notesArea">${escHtml(programme.notes)}</textarea></div>
+    <div class="field"><label>Plans</label><div id="pfPlanList"></div></div>
+    <div class="rowActions"><button class="btnGhost" id="pfAddPlan">+ Add plan</button></div>
+    <div class="rowActions">
+      <button class="btnGhost" id="pfExportPdf">📄 Export PDF</button>
+      <button class="btnGhost" id="pfExportGym">⬇ Export for Gym Tracker</button>
+    </div>
+    <div class="rowActions">
+      ${programme.status==='active'
+        ? `<button class="btnGhost btnDanger" id="pfArchive">Archive programme</button>`
+        : `<button class="btnGhost" id="pfActivate">★ Set as active</button>`}
+      <button class="btnAmber" id="pfSave">Save</button>
+    </div>
+  `;
+  body.querySelector('#pfBack').addEventListener('click', () => renderClientProgrammeTab(body, client));
+
+  const planListEl = body.querySelector('#pfPlanList');
+  function refreshPlans(){
+    const plans = programme.plans || [];
+    if (!plans.length){
+      planListEl.innerHTML = '<div class="emptyState" style="padding:20px 10px;">No plans yet — add one below.</div>';
+      return;
+    }
+    planListEl.innerHTML = plans.map((pl, idx) => `
+      <div class="clientCard" data-idx="${idx}" style="margin-bottom:8px;">
+        <div><div class="cName">${escHtml(pl.name)}</div><div class="cMeta">${(pl.items||[]).length} exercise${(pl.items||[]).length===1?'':'s'}</div></div>
+        <button class="iconBtn" data-removeplan="${idx}" title="Remove plan">✕</button>
+      </div>
     `).join('');
-    histEl.querySelectorAll('[data-histpdf]').forEach(btn => {
-      btn.addEventListener('click', e => { e.preventDefault(); exportProgrammePDF(history[Number(btn.dataset.histpdf)], client); });
+    planListEl.querySelectorAll('.clientCard').forEach(el => {
+      el.addEventListener('click', e => {
+        if (e.target.closest('[data-removeplan]')) return;
+        openProgrammePlanSheet(programme, Number(el.dataset.idx), body, client);
+      });
     });
-    histEl.querySelectorAll('[data-histgym]').forEach(btn => {
-      btn.addEventListener('click', e => { e.preventDefault(); exportProgrammeForGymTracker(history[Number(btn.dataset.histgym)], client); });
+    planListEl.querySelectorAll('[data-removeplan]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (!confirm(`Remove "${plans[Number(btn.dataset.removeplan)].name}" from this programme?`)) return;
+        plans.splice(Number(btn.dataset.removeplan), 1);
+        programme.updatedAt = new Date().toISOString();
+        persistAndSync('pt_programs','programs',programme);
+        refreshPlans();
+        renderProgrammeDetail(body, client, programme.id);
+      });
     });
   }
+  refreshPlans();
+
+  body.querySelector('#pfAddPlan').addEventListener('click', () => openAddPlanPicker(programme, () => { renderProgrammeDetail(body, client, programme.id); }));
+  body.querySelector('#pfSave').addEventListener('click', () => {
+    const name = body.querySelector('#pfName').value.trim();
+    if (!name){ toast('Name is required'); return; }
+    programme.name = name;
+    programme.startDate = body.querySelector('#pfStart').value || programme.startDate;
+    programme.durationWeeks = body.querySelector('#pfWeeks').value ? Number(body.querySelector('#pfWeeks').value) : null;
+    programme.notes = body.querySelector('#pfNotes').value;
+    programme.updatedAt = new Date().toISOString();
+    persistAndSync('pt_programs','programs',programme);
+    toast('Saved');
+  });
+  const archiveBtn = body.querySelector('#pfArchive');
+  if (archiveBtn) archiveBtn.addEventListener('click', () => {
+    if (!confirm(`Archive "${programme.name}"? You can still open and reopen it later.`)) return;
+    programme.status = 'archived'; programme.updatedAt = new Date().toISOString();
+    persistAndSync('pt_programs','programs',programme);
+    renderClientProgrammeTab(body, client);
+    toast('Programme archived');
+  });
+  const activateBtn = body.querySelector('#pfActivate');
+  if (activateBtn) activateBtn.addEventListener('click', () => {
+    setActiveProgramme(client, programme.id);
+    renderProgrammeDetail(body, client, programme.id);
+    toast('Set as active programme');
+  });
+  body.querySelector('#pfExportPdf').addEventListener('click', () => exportProgrammePDF(programme, client));
+  body.querySelector('#pfExportGym').addEventListener('click', () => exportProgrammeForGymTracker(programme, client));
 }
 
 function openNewProgrammeSheet(client, parentBody){
@@ -1948,7 +2095,7 @@ function openNewProgrammeSheet(client, parentBody){
     _env.data.programs.push(prog);
     persistAndSync('pt_programs','programs',prog);
     backdrop.remove();
-    renderClientProgrammeTab(parentBody, client);
+    renderProgrammeDetail(parentBody, client, prog.id);
     toast('Programme created — add plans to it below');
   });
 }
